@@ -1,0 +1,43 @@
+{
+  "schema_version": "frozenlake_lvr_v1",
+  "image_root": "training_samples/frozenlake",
+  "path_semantics": "All image and source trace paths are relative to image_root.",
+  "instruction": "You are playing a deterministic FrozenLake navigation puzzle. In the image, locate the character, the treasure (goal), and the holes (obstacles). Move the character one grid cell at a time using only LEFT, RIGHT, UP, or DOWN. Touching a hole or obstacle loses the game, and moves may not leave the board. Find a shortest safe route to the treasure. Return only the space-separated action sequence.",
+  "action_vocabulary": [
+    "LEFT",
+    "RIGHT",
+    "UP",
+    "DOWN"
+  ],
+  "action_separator": " ",
+  "latent_target_semantics": "aux_images[i] is the successor-state image produced by actions[i]; the last aux image is also final_image.",
+  "seed": 42,
+  "requested_split_ratios": {
+    "train": 0.9,
+    "validation": 0.05,
+    "test": 0.05
+  },
+  "sample_count": 4000,
+  "split_counts": {
+    "train": 3600,
+    "validation": 200,
+    "test": 200
+  },
+  "level_counts": {
+    "3": 1000,
+    "4": 1000,
+    "5": 1000,
+    "6": 1000
+  },
+  "transition_count": {
+    "total": 12806,
+    "minimum": 1,
+    "maximum": 17,
+    "mean": 3.2015
+  },
+  "layout_overlap_between_splits": {
+    "train_validation": 0,
+    "train_test": 0,
+    "validation_test": 0
+  }
+}
