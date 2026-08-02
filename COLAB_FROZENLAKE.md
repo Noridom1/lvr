@@ -22,10 +22,15 @@ Transformers 4.54.0 from `requirements.txt`; `environment.yaml` has the older
 4.51.3 model layout and must not be used for this FrozenLake path.
 
 ```bash
-pip install -r requirements.txt
-pip install qwen-vl-utils
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+  --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-frozenlake-colab.txt
 pip install flash-attn --no-build-isolation
 ```
+
+The repository-wide `requirements.txt` includes packages for unrelated video,
+DPO, GRPO, and serving workflows. The notebook deliberately uses the smaller
+FrozenLake file so Colab only resolves packages imported by this training path.
 
 Restart the Colab runtime after changing Torch/Transformers. If FlashAttention
 cannot be installed, skip its install and use the SDPA commands below.
