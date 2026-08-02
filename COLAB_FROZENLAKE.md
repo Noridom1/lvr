@@ -1,5 +1,11 @@
 # FrozenLake LVR on one Colab A100
 
+For the guided setup, open
+[the Colab notebook](https://colab.research.google.com/github/Noridom1/lvr/blob/main/notebooks/frozenlake_lvr_colab.ipynb).
+It downloads and verifies the public FrozenLake archive, restores the expected
+directory layout, and exposes separate smoke-test, pilot, full-training,
+resume, validation, and final-test gates.
+
 This handoff targets the measured runtime:
 
 - NVIDIA A100-SXM4-40GB;
