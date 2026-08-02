@@ -2,7 +2,9 @@
 # Torch, torchvision, and torchaudio are installed from the official cu124
 # PyTorch index in the Colab notebook before this file is installed.
 accelerate==1.6.0
-av==14.4.0
+# 14.2.0 is the newest 14.x release with a CPython 3.12 manylinux wheel.
+# 14.4.0 is source-only and fails to build on a stock Colab runtime.
+av==14.2.0
 deepspeed==0.16.7
 gdown==5.2.0
 numpy==2.1.2

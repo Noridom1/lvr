@@ -32,14 +32,15 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
             combined_source,
         )
 
-    def test_dependency_files_do_not_reference_missing_av_release(self) -> None:
+    def test_dependency_files_use_colab_compatible_av_wheel_release(self) -> None:
         general = (REPOSITORY_ROOT / "requirements.txt").read_text(encoding="utf-8")
         colab = (REPOSITORY_ROOT / "requirements-frozenlake-colab.txt").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("av==14.3.0", general)
-        self.assertIn("av==14.4.0", general)
-        self.assertIn("av==14.4.0", colab)
+        self.assertNotIn("av==14.4.0", general)
+        self.assertIn("av==14.2.0", general)
+        self.assertIn("av==14.2.0", colab)
 
 
 if __name__ == "__main__":
