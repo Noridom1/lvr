@@ -27,6 +27,9 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("requirements-frozenlake-colab.txt", combined_source)
         self.assertIn("torch==2.6.0", combined_source)
         self.assertIn("Expected torch 2.6.0", combined_source)
+        self.assertIn("FrozenLake preflight failed", combined_source)
+        self.assertIn("capture_output=True", combined_source)
+        self.assertIn("check=False", combined_source)
         self.assertNotIn(
             'str(REPO_DIR / "requirements.txt")',
             combined_source,
