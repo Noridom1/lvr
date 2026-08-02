@@ -15,6 +15,7 @@ import transformers
 
 
 EXPECTED_TRANSFORMERS = "4.54.0"
+EXPECTED_PEFT = "0.15.2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +56,10 @@ def main() -> None:
         )
     if package_version("deepspeed") is None:
         errors.append("deepspeed is not installed")
+    if package_version("peft") != EXPECTED_PEFT:
+        errors.append(
+            f"peft must be {EXPECTED_PEFT}; found {package_version('peft')}"
+        )
     if package_version("qwen-vl-utils") is None:
         errors.append("qwen-vl-utils is not installed")
     if args.attention == "flash_attention_2":
@@ -82,11 +87,11 @@ def main() -> None:
     ram_total_gib = memory.total / 1024**3
     ram_free_gib = memory.available / 1024**3
     disk_free_gib = shutil.disk_usage(workspace).free / 1024**3
-    if ram_total_gib < 75:
-        errors.append(f"full CPU-offload training expects about 75+ GiB RAM; found {ram_total_gib:.1f}")
-    if ram_free_gib < 70:
+    if ram_total_gib < 24:
+        errors.append(f"LoRA training expects about 24+ GiB RAM; found {ram_total_gib:.1f}")
+    if ram_free_gib < 20:
         warnings.append(f"only {ram_free_gib:.1f} GiB RAM is currently free")
-    if disk_free_gib < 100:
+    if disk_free_gib < 50:
         warnings.append(f"only {disk_free_gib:.1f} GiB local disk is free")
 
     required_paths = (
@@ -94,7 +99,7 @@ def main() -> None:
         "data/frozenlake/validation.jsonl",
         "data/frozenlake/test.jsonl",
         "training_samples/frozenlake/00000000/frame_000.png",
-        "scripts/zero3_offload.json",
+        "scripts/zero2.json",
     )
     missing_paths = [path for path in required_paths if not (workspace / path).is_file()]
     if missing_paths:
@@ -110,6 +115,7 @@ def main() -> None:
         "torch": torch.__version__,
         "transformers": transformers.__version__,
         "deepspeed": package_version("deepspeed"),
+        "peft": package_version("peft"),
         "qwen_vl_utils": package_version("qwen-vl-utils"),
         "attention": args.attention,
         "warnings": warnings,

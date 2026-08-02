@@ -65,6 +65,40 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         )
         self.assertIn('export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"', launcher)
 
+    def test_colab_launcher_uses_memory_safe_lora(self) -> None:
+        launcher = (
+            REPOSITORY_ROOT / "scripts" / "finetune_lvr_frozenlake_3b_colab.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('export LORA_ENABLE="${LORA_ENABLE:-True}"', launcher)
+        self.assertIn('export FREEZE_LLM="${FREEZE_LLM:-True}"', launcher)
+        self.assertIn(
+            'export DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero2.json}"',
+            launcher,
+        )
+
+        notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+        combined_source = "\n".join(
+            cell_source(cell) for cell in notebook["cells"]
+        )
+        self.assertIn('"LORA_ENABLE": "True"', combined_source)
+        self.assertIn('"DEEPSPEED_CONFIG": "scripts/zero2.json"', combined_source)
+
+    def test_frozenlake_lora_saves_and_loads_latent_trainables(self) -> None:
+        train_source = (
+            REPOSITORY_ROOT / "src/train/train_frozenlake_lvr.py"
+        ).read_text(encoding="utf-8")
+        eval_source = (
+            REPOSITORY_ROOT / "evaluation/evaluate_frozenlake_lvr.py"
+        ).read_text(encoding="utf-8")
+        trainer_source = (
+            REPOSITORY_ROOT / "src/trainer/lvr_trainer.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("get_peft_model", train_source)
+        self.assertIn("non_lora_state_dict.bin", train_source)
+        self.assertIn("non_lora_state_dict.bin", trainer_source)
+        self.assertIn("PeftModel.from_pretrained", eval_source)
+        self.assertIn("merge_and_unload", eval_source)
+
     def test_direct_entrypoints_add_repository_root_to_python_path(self) -> None:
         expected_roots = {
             "scripts/smoke_test_frozenlake_lvr.py": "parents[1]",

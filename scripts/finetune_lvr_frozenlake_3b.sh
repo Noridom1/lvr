@@ -18,6 +18,11 @@ SAVE_STEPS="${SAVE_STEPS:-100}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-3}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 DISABLE_FLASH_ATTN2="${DISABLE_FLASH_ATTN2:-False}"
+LORA_ENABLE="${LORA_ENABLE:-False}"
+LORA_RANK="${LORA_RANK:-32}"
+LORA_ALPHA="${LORA_ALPHA:-64}"
+FREEZE_LLM="${FREEZE_LLM:-False}"
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero3_offload.json}"
 
 # A 256x256 state is about 81 merged visual tokens. The dataset averages 3.2
 # successor states, or approximately 259 supervised latent tokens per sample.
@@ -44,10 +49,13 @@ deepspeed --num_gpus "$NUM_GPUS" src/train/train_frozenlake_lvr.py \
     --loss_lvr_lambda 0.1 \
     --loss_mode_switch_fct mse \
     --loss_mode_switch_lambda 0.1 \
-    --deepspeed scripts/zero3_offload.json \
+    --deepspeed "$DEEPSPEED_CONFIG" \
     --freeze_vision_tower True \
     --freeze_merger True \
-    --freeze_llm False \
+    --freeze_llm "$FREEZE_LLM" \
+    --lora_enable "$LORA_ENABLE" \
+    --lora_rank "$LORA_RANK" \
+    --lora_alpha "$LORA_ALPHA" \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 "$DISABLE_FLASH_ATTN2" \

@@ -174,6 +174,25 @@ class QwenLVRSFTTrainer(Trainer):
         # output_dir is the local path forcheckpoint
         output_dir = os.path.join(run_dir, checkpoint_folder)
         self.save_model(output_dir, _internal_call=True)
+        if self.args.lora_enable and self.args.should_save:
+            # Trainer/PEFT saves adapter weights, but the learned latent stopping
+            # vector is intentionally outside LoRA and must travel with every
+            # resumable checkpoint.
+            non_lora_state = {
+                "lvr_latent_end_emb": maybe_zero_3(
+                    parameter, ignore_status=True, name=name
+                )
+                for name, parameter in model.named_parameters()
+                if name.endswith("lvr_latent_end_emb") and parameter.requires_grad
+            }
+            if set(non_lora_state) != {"lvr_latent_end_emb"}:
+                raise ValueError("Could not collect the trainable latent-end vector")
+            torch.save(
+                non_lora_state,
+                os.path.join(output_dir, "non_lora_state_dict.bin"),
+            )
+            if hasattr(model, "get_base_model"):
+                model.get_base_model().config.save_pretrained(output_dir)
 
         if self.args.save_strategy in [SaveStrategy.STEPS, SaveStrategy.EPOCH] and self.state.best_global_step:
             best_checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.best_global_step}"

@@ -12,6 +12,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 import torch
+import torch.nn as nn
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoConfig, AutoProcessor, HfArgumentParser
 
 from src.frozenlake_lvr_dataset import make_frozenlake_lvr_data_module
@@ -19,7 +21,11 @@ from src.model.qwen_lvr_model import QwenWithLVR
 from src.params import DataArguments, ModelArguments, TrainingArguments
 from src.train.monkey_patch_forward_frozenlake import replace_qwen2_5_with_frozenlake_forward
 from src.train.monkey_patch_patch_emb import replace_qwen_2_5_vl_patch_emb
-from src.train.train_utils import safe_save_model_for_hf_trainer
+from src.train.train_utils import (
+    get_peft_state_maybe_zero_3,
+    get_peft_state_non_lora_maybe_zero_3,
+    safe_save_model_for_hf_trainer,
+)
 from src.trainer import QwenLVRSFTTrainer
 
 
@@ -33,6 +39,34 @@ class FrozenLakeDataArguments(DataArguments):
 def _set_requires_grad(parameters, value: bool) -> None:
     for parameter in parameters:
         parameter.requires_grad = value
+
+
+def _find_lora_target_modules(model) -> list[str]:
+    """Adapt the language path, including token input/output projections."""
+    targets = []
+    for name, module in model.named_modules():
+        if "visual" in name:
+            continue
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            targets.append(name)
+    if not targets:
+        raise ValueError("No language modules were found for LoRA")
+    return targets
+
+
+def _load_non_lora_trainables(model, checkpoint: str) -> None:
+    state_path = Path(checkpoint) / "non_lora_state_dict.bin"
+    if not state_path.is_file():
+        raise FileNotFoundError(
+            f"LoRA checkpoint is missing its latent trainables: {state_path}"
+        )
+    state_dict = torch.load(state_path, map_location="cpu", weights_only=True)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if unexpected:
+        raise ValueError(f"Unexpected non-LoRA checkpoint keys: {unexpected}")
+    loaded = set(state_dict)
+    if not any(name.endswith("lvr_latent_end_emb") for name in loaded):
+        raise ValueError("LoRA checkpoint does not contain lvr_latent_end_emb")
 
 
 def train() -> None:
@@ -49,8 +83,10 @@ def train() -> None:
         raise ValueError("FrozenLake auxiliary-image batches do not support data packing")
     if training_args.online_checkpoint:
         raise ValueError("Use a local output directory for the FrozenLake entry point")
-    if training_args.lora_enable:
-        raise ValueError("LoRA is not wired into the public LVR trainer; use full-parameter training")
+    if training_args.lora_enable and not training_args.freeze_llm:
+        raise ValueError("LoRA requires --freeze_llm True so the base LLM stays frozen")
+    if training_args.vision_lora:
+        raise ValueError("FrozenLake LoRA currently keeps the vision tower frozen")
 
     compute_dtype = (
         torch.float16
@@ -59,7 +95,13 @@ def train() -> None:
         if training_args.bf16
         else torch.float32
     )
-    model_path = training_args.checkpoint_name or model_args.model_id
+    # A PEFT checkpoint stores adapters rather than a second copy of Qwen, so
+    # resume always reconstructs the base model from model_id first.
+    model_path = (
+        model_args.model_id
+        if training_args.lora_enable
+        else training_args.checkpoint_name or model_args.model_id
+    )
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     config.latent_end_token = True
     config.lvr_head = False
@@ -99,10 +141,11 @@ def train() -> None:
         model.enable_input_require_grads()
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
 
-    # On resume, load the tokenizer from the checkpoint so the learned LVR token
-    # ids cannot silently drift from the resized embedding table.
+    # On resume, load the tokenizer from the checkpoint so the LVR token ids
+    # cannot silently drift from the resized embedding table.
+    processor_path = training_args.checkpoint_name or model_path
     processor = AutoProcessor.from_pretrained(
-        model_path,
+        processor_path,
         min_pixels=data_args.image_min_pixels,
         max_pixels=data_args.image_max_pixels,
     )
@@ -122,6 +165,30 @@ def train() -> None:
     if model.config.vocab_size < len(processor.tokenizer):
         model.resize_token_embeddings(len(processor.tokenizer))
 
+    if training_args.lora_enable:
+        if training_args.checkpoint_name:
+            _load_non_lora_trainables(model, training_args.checkpoint_name)
+            model = PeftModel.from_pretrained(
+                model,
+                training_args.checkpoint_name,
+                is_trainable=True,
+            )
+        else:
+            peft_config = LoraConfig(
+                r=training_args.lora_rank,
+                lora_alpha=training_args.lora_alpha,
+                target_modules=_find_lora_target_modules(model),
+                lora_dropout=training_args.lora_dropout,
+                bias=training_args.lora_bias,
+            )
+            model = get_peft_model(model, peft_config)
+
+        # PEFT freezes every non-adapter parameter. The learned stopping target
+        # is deliberately the one small non-LoRA exception.
+        base_model = model.get_base_model()
+        base_model.lvr_latent_end_emb.requires_grad = True
+        model.print_trainable_parameters()
+
     data_module = make_frozenlake_lvr_data_module(processor, data_args)
     trainer = QwenLVRSFTTrainer(
         model=model,
@@ -136,7 +203,29 @@ def train() -> None:
     trainer.train(resume_from_checkpoint=training_args.checkpoint_name)
     trainer.save_state()
     model.config.use_cache = True
-    safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
+    if training_args.lora_enable:
+        lora_state = get_peft_state_maybe_zero_3(
+            model.named_parameters(), training_args.lora_bias
+        )
+        saved_non_lora_state = get_peft_state_non_lora_maybe_zero_3(
+            model.named_parameters(), require_grad_only=True
+        )
+        non_lora_state = {
+            name.rsplit(".", 1)[-1]: value
+            for name, value in saved_non_lora_state.items()
+            if name.endswith("lvr_latent_end_emb")
+        }
+        if set(non_lora_state) != {"lvr_latent_end_emb"}:
+            raise ValueError("Could not collect the trainable latent-end vector")
+        if trainer.is_world_process_zero():
+            model.get_base_model().config.save_pretrained(training_args.output_dir)
+            model.save_pretrained(training_args.output_dir, state_dict=lora_state)
+            torch.save(
+                non_lora_state,
+                Path(training_args.output_dir) / "non_lora_state_dict.bin",
+            )
+    else:
+        safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
     if trainer.is_world_process_zero():
         # Preserve the four added LVR tokens with the final standalone model.
         processor.save_pretrained(training_args.output_dir)

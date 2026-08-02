@@ -109,6 +109,71 @@ def prepare_inputs(processor, record: dict[str, Any], image_folder: Path):
     )
 
 
+def load_checkpoint(checkpoint: str, attention: str):
+    checkpoint_path = Path(checkpoint)
+    adapter_path = checkpoint_path / "adapter_config.json"
+    if not adapter_path.is_file():
+        config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
+        model = QwenWithLVR.from_pretrained(
+            checkpoint,
+            config=config,
+            trust_remote_code=True,
+            torch_dtype="auto",
+            attn_implementation=attention,
+            device_map="auto",
+        ).eval()
+        return model, AutoProcessor.from_pretrained(checkpoint)
+
+    from peft import PeftConfig, PeftModel
+
+    adapter_config = PeftConfig.from_pretrained(checkpoint)
+    task_config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
+    base_config = AutoConfig.from_pretrained(
+        adapter_config.base_model_name_or_path, trust_remote_code=True
+    )
+    for name in (
+        "latent_end_token",
+        "lvr_head",
+        "lvr_head_type",
+        "loss_lvr_fct",
+        "loss_mode_switch_fct",
+        "lvr_id",
+        "lvr_latent_end_id",
+        "lvr_start_id",
+        "lvr_end_id",
+    ):
+        if hasattr(task_config, name):
+            setattr(base_config, name, getattr(task_config, name))
+
+    model, loading_info = QwenWithLVR.from_pretrained(
+        adapter_config.base_model_name_or_path,
+        config=base_config,
+        trust_remote_code=True,
+        torch_dtype="auto",
+        attn_implementation=attention,
+        device_map="auto",
+        output_loading_info=True,
+    )
+    if "lvr_latent_end_emb" in loading_info["missing_keys"]:
+        model.reset_lvr_latent_end_emb()
+
+    processor = AutoProcessor.from_pretrained(checkpoint)
+    if model.config.vocab_size < len(processor.tokenizer):
+        model.resize_token_embeddings(len(processor.tokenizer))
+    latent_path = checkpoint_path / "non_lora_state_dict.bin"
+    if not latent_path.is_file():
+        raise FileNotFoundError(f"Adapter checkpoint is missing {latent_path.name}")
+    latent_state = torch.load(latent_path, map_location="cpu", weights_only=True)
+    missing, unexpected = model.load_state_dict(latent_state, strict=False)
+    if unexpected or "lvr_latent_end_emb" not in latent_state:
+        raise ValueError("Invalid FrozenLake non-LoRA trainables file")
+
+    # Merge only for inference. This returns the original QwenWithLVR class, so
+    # its custom latent decoding method remains directly available.
+    model = PeftModel.from_pretrained(model, checkpoint).merge_and_unload().eval()
+    return model, processor
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
@@ -117,19 +182,10 @@ def main() -> None:
     if args.max_samples is not None:
         records = records[: args.max_samples]
 
-    config = AutoConfig.from_pretrained(args.checkpoint, trust_remote_code=True)
-    if not getattr(config, "latent_end_token", False):
-        raise ValueError("Checkpoint was not trained with latent_end_token")
     replace_qwen2_5_with_frozenlake_forward()
-    model = QwenWithLVR.from_pretrained(
-        args.checkpoint,
-        config=config,
-        trust_remote_code=True,
-        torch_dtype="auto",
-        attn_implementation=args.attention,
-        device_map="auto",
-    ).eval()
-    processor = AutoProcessor.from_pretrained(args.checkpoint)
+    model, processor = load_checkpoint(args.checkpoint, args.attention)
+    if not getattr(model.config, "latent_end_token", False):
+        raise ValueError("Checkpoint was not trained with latent_end_token")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

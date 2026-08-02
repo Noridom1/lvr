@@ -9,8 +9,17 @@ export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export NUM_GPUS="${NUM_GPUS:-1}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 
-# A full-parameter AdamW checkpoint includes large optimizer states. Keep one
-# resumable checkpoint and write it less often to protect Colab local storage.
+# Full-parameter AdamW is killed by the 83 GiB Colab host when its CPU optimizer
+# states are materialized. Adapt the language path with LoRA while continuing to
+# train the task-specific latent-end vector. ZeRO-2 keeps the small optimizer on
+# the A100 and avoids CPUAdam's first-step RAM spike.
+export LORA_ENABLE="${LORA_ENABLE:-True}"
+export LORA_RANK="${LORA_RANK:-32}"
+export LORA_ALPHA="${LORA_ALPHA:-64}"
+export FREEZE_LLM="${FREEZE_LLM:-True}"
+export DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero2.json}"
+
+# Keep one resumable checkpoint and write it less often to protect Colab disk.
 export EVAL_STEPS="${EVAL_STEPS:-250}"
 export SAVE_STEPS="${SAVE_STEPS:-250}"
 export SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-1}"
