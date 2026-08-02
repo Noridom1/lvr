@@ -31,10 +31,11 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn('"pip", "uninstall", "-y", "flash-attn"', combined_source)
         self.assertIn('ATTENTION = "sdpa"', combined_source)
         self.assertIn('DISABLE_FLASH_ATTN2 = "True"', combined_source)
+        self.assertIn("from scripts.colab_subprocess import run_streaming", combined_source)
+        self.assertIn("run_streaming(", combined_source)
         self.assertNotIn("import flash_attn", combined_source)
-        self.assertIn("FrozenLake preflight failed", combined_source)
-        self.assertIn("capture_output=True", combined_source)
-        self.assertIn("check=False", combined_source)
+        self.assertIn("FrozenLake preflight passed", combined_source)
+        self.assertNotIn("capture_output=True", combined_source)
         self.assertIn('"scripts.smoke_test_frozenlake_lvr"', combined_source)
         self.assertIn('"evaluation.evaluate_frozenlake_lvr"', combined_source)
         self.assertNotIn('"scripts/smoke_test_frozenlake_lvr.py"', combined_source)
@@ -90,6 +91,17 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
             self.assertIn("output_loading_info=True", source)
             self.assertIn('if "lvr_latent_end_emb" in loading_info["missing_keys"]', source)
             self.assertIn("model.reset_lvr_latent_end_emb()", source)
+
+        self.assertIn("deepspeed.zero.GatheredParameters", model_source)
+        self.assertIn("def lvr_latent_end_is_finite", model_source)
+
+    def test_streaming_subprocess_helper_reports_live_command_failures(self) -> None:
+        helper_source = (REPOSITORY_ROOT / "scripts/colab_subprocess.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("stderr=subprocess.STDOUT", helper_source)
+        self.assertIn("flush=True", helper_source)
+        self.assertIn("Last {len(recent_output)} output lines", helper_source)
 
 
 if __name__ == "__main__":

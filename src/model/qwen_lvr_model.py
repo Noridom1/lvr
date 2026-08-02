@@ -2,6 +2,7 @@
     Implementation of LVR models based on Qwen-2.5-VL series
 """
 import math
+from contextlib import nullcontext
 import torch.nn as nn
 import torch
 from transformers import Qwen2_5_VLForConditionalGeneration
@@ -91,20 +92,63 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             self.reset_lvr_latent_end_emb()
 
     def reset_lvr_latent_end_emb(self):
-        """Initialize the learned stop target without low-precision overflow."""
+        """Initialize the learned stop target, including under ZeRO-3 partitioning."""
         if self.lvr_latent_end_emb.is_meta:
             raise RuntimeError("Cannot initialize lvr_latent_end_emb on the meta device")
-        target_norm = math.sqrt(self.config.hidden_size)
-        with torch.no_grad():
-            # Normalize in FP32 even when the model itself is BF16.
-            value = torch.randn(
-                self.config.hidden_size,
-                dtype=torch.float32,
-                device=self.lvr_latent_end_emb.device,
+
+        parameter = self.lvr_latent_end_emb
+        is_zero3_partitioned = hasattr(parameter, "ds_id")
+        if is_zero3_partitioned:
+            # ZeRO-3 can expose a missing checkpoint parameter as a zero-sized
+            # local partition. Gather its original shape before initializing it,
+            # then broadcast rank 0's value when the context exits.
+            import deepspeed
+
+            parameter_context = deepspeed.zero.GatheredParameters(
+                [parameter], modifier_rank=0
             )
-            value = value / value.norm().clamp_min(1e-6)
-            value = value * target_norm
-            self.lvr_latent_end_emb.copy_(value.to(self.lvr_latent_end_emb.dtype))
+        else:
+            parameter_context = nullcontext()
+
+        with parameter_context:
+            should_initialize = (
+                not is_zero3_partitioned
+                or not dist.is_initialized()
+                or dist.get_rank() == 0
+            )
+            if should_initialize:
+                if parameter.numel() != self.config.hidden_size:
+                    raise RuntimeError(
+                        "Gathered lvr_latent_end_emb has unexpected size "
+                        f"{parameter.numel()}; expected {self.config.hidden_size}"
+                    )
+                target_norm = math.sqrt(self.config.hidden_size)
+                with torch.no_grad():
+                    # Normalize in FP32 even when the model itself is BF16.
+                    value = torch.randn(
+                        self.config.hidden_size,
+                        dtype=torch.float32,
+                        device=parameter.device,
+                    )
+                    value = value / value.norm().clamp_min(1e-6)
+                    value = value * target_norm
+                    parameter.copy_(value.to(parameter.dtype))
+
+    def lvr_latent_end_is_finite(self):
+        """Check the complete stop target rather than a ZeRO-3 local shard."""
+        parameter = self.lvr_latent_end_emb
+        if parameter.is_meta:
+            return False
+        if hasattr(parameter, "ds_id"):
+            import deepspeed
+
+            parameter_context = deepspeed.zero.GatheredParameters([parameter])
+        else:
+            parameter_context = nullcontext()
+        with parameter_context:
+            return parameter.numel() == self.config.hidden_size and bool(
+                torch.isfinite(parameter.detach().float()).all().item()
+            )
 
         # lvr_latent_end_emb = torch.full(
         #     (config.hidden_size,),

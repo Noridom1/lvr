@@ -81,7 +81,7 @@ def train() -> None:
     # it explicitly after meta-device checkpoint loading; preserve it on resume.
     if "lvr_latent_end_emb" in loading_info["missing_keys"]:
         model.reset_lvr_latent_end_emb()
-    if not torch.isfinite(model.lvr_latent_end_emb.detach().float()).all():
+    if not model.lvr_latent_end_is_finite():
         raise FloatingPointError("lvr_latent_end_emb is non-finite immediately after loading")
     replace_qwen_2_5_vl_patch_emb()
     model.config.use_cache = False
