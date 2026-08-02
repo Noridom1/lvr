@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import shutil
 from importlib.metadata import PackageNotFoundError, version
@@ -49,8 +48,14 @@ def main() -> None:
         errors.append("deepspeed is not installed")
     if package_version("qwen-vl-utils") is None:
         errors.append("qwen-vl-utils is not installed")
-    if args.attention == "flash_attention_2" and importlib.util.find_spec("flash_attn") is None:
-        errors.append("flash-attn is not installed; install it or rerun with --attention sdpa")
+    if args.attention == "flash_attention_2":
+        try:
+            import flash_attn  # noqa: F401
+        except Exception as exc:
+            errors.append(
+                "flash-attn cannot be imported "
+                f"({type(exc).__name__}: {exc}); rerun with --attention sdpa"
+            )
 
     if not torch.cuda.is_available():
         errors.append("CUDA is not available")
