@@ -27,6 +27,8 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("requirements-frozenlake-colab.txt", combined_source)
         self.assertIn("torch==2.6.0", combined_source)
         self.assertIn("Expected torch 2.6.0", combined_source)
+        self.assertIn("PREFER_FLASH_ATTENTION = False", combined_source)
+        self.assertIn('"pip", "uninstall", "-y", "flash-attn"', combined_source)
         self.assertIn("Falling back to SDPA", combined_source)
         self.assertIn("import flash_attn", combined_source)
         self.assertIn("FrozenLake preflight failed", combined_source)

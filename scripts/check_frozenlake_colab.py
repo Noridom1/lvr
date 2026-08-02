@@ -12,7 +12,6 @@ from pathlib import Path
 import psutil
 import torch
 import transformers
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
 
 
 EXPECTED_TRANSFORMERS = "4.54.0"
@@ -42,8 +41,18 @@ def main() -> None:
         errors.append(
             f"transformers must be {EXPECTED_TRANSFORMERS}; found {transformers.__version__}"
         )
-    if not hasattr(Qwen2_5_VLModel, "get_image_features"):
-        errors.append("Qwen2_5_VLModel.get_image_features is unavailable")
+    try:
+        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            Qwen2_5_VLModel,
+        )
+
+        if not hasattr(Qwen2_5_VLModel, "get_image_features"):
+            errors.append("Qwen2_5_VLModel.get_image_features is unavailable")
+    except Exception as exc:
+        errors.append(
+            "Qwen2.5-VL could not be imported "
+            f"({type(exc).__name__}: {exc})"
+        )
     if package_version("deepspeed") is None:
         errors.append("deepspeed is not installed")
     if package_version("qwen-vl-utils") is None:
