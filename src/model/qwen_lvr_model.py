@@ -81,14 +81,30 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def _init_lvr_latent_end_emb(self):
 
         print(f"Activated Learnable latent end token of LVR")
-        # Initializing the learnable latentend
-        # 2X norm to distinguish this from the normal semantic space
-        target_norm_scale_latentend = 1
+        # ``from_pretrained`` may construct the model on the meta device.  A
+        # random tensor created there has no values, so create the parameter
+        # first and reset it after checkpoint loading when this key is missing.
+        self.lvr_latent_end_emb = torch.nn.Parameter(
+            torch.empty(self.config.hidden_size, dtype=self.dtype, device=self.device)
+        )
+        if not self.lvr_latent_end_emb.is_meta:
+            self.reset_lvr_latent_end_emb()
+
+    def reset_lvr_latent_end_emb(self):
+        """Initialize the learned stop target without low-precision overflow."""
+        if self.lvr_latent_end_emb.is_meta:
+            raise RuntimeError("Cannot initialize lvr_latent_end_emb on the meta device")
+        target_norm = math.sqrt(self.config.hidden_size)
         with torch.no_grad():
-            v = torch.randn(self.config.hidden_size, dtype=self.dtype, device=self.device)
-            v = v / (v.norm() + 1e-6)
-            v = v * (target_norm_scale_latentend * math.sqrt(self.config.hidden_size))
-        self.lvr_latent_end_emb = torch.nn.Parameter(v)
+            # Normalize in FP32 even when the model itself is BF16.
+            value = torch.randn(
+                self.config.hidden_size,
+                dtype=torch.float32,
+                device=self.lvr_latent_end_emb.device,
+            )
+            value = value / value.norm().clamp_min(1e-6)
+            value = value * target_norm
+            self.lvr_latent_end_emb.copy_(value.to(self.lvr_latent_end_emb.dtype))
 
         # lvr_latent_end_emb = torch.full(
         #     (config.hidden_size,),

@@ -71,13 +71,21 @@ def main() -> None:
     config.loss_lvr_fct = "cosine"
     config.loss_mode_switch_fct = "mse"
     replace_qwen2_5_with_frozenlake_forward()
-    model = QwenWithLVR.from_pretrained(
+    model, loading_info = QwenWithLVR.from_pretrained(
         args.model,
         config=config,
         torch_dtype=torch.bfloat16,
         attn_implementation=args.attention,
-    ).cuda()
+        output_loading_info=True,
+    )
+    if "lvr_latent_end_emb" in loading_info["missing_keys"]:
+        model.reset_lvr_latent_end_emb()
+    model = model.cuda()
     replace_qwen_2_5_vl_patch_emb()
+
+    latent_end = model.lvr_latent_end_emb.detach().float()
+    if not torch.isfinite(latent_end).all():
+        raise FloatingPointError("lvr_latent_end_emb is non-finite immediately after loading")
 
     model.config.lvr_id = processor.tokenizer.convert_tokens_to_ids("<|lvr|>")
     model.config.lvr_latent_end_id = processor.tokenizer.convert_tokens_to_ids(
@@ -133,6 +141,7 @@ def main() -> None:
             "sequence_tokens": int(batch["attention_mask"].sum().item()),
             "latent_positions": latent_positions,
             "target_images": int(batch["lvr_tokens_thw"].shape[0]),
+            "latent_end_norm": float(latent_end.norm()),
             **losses,
         }
     )

@@ -75,6 +75,22 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
             self.assertIn(f"Path(__file__).resolve().{expected_parent}", source)
             self.assertIn("sys.path.insert(0, str(REPOSITORY_ROOT))", source)
 
+    def test_missing_latent_end_parameter_is_initialized_after_loading(self) -> None:
+        model_source = (REPOSITORY_ROOT / "src/model/qwen_lvr_model.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def reset_lvr_latent_end_emb", model_source)
+        self.assertIn("dtype=torch.float32", model_source)
+
+        for relative_path in (
+            "scripts/smoke_test_frozenlake_lvr.py",
+            "src/train/train_frozenlake_lvr.py",
+        ):
+            source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn("output_loading_info=True", source)
+            self.assertIn('if "lvr_latent_end_emb" in loading_info["missing_keys"]', source)
+            self.assertIn("model.reset_lvr_latent_end_emb()", source)
+
 
 if __name__ == "__main__":
     unittest.main()
