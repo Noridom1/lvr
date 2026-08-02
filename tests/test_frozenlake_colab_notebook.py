@@ -27,10 +27,11 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("requirements-frozenlake-colab.txt", combined_source)
         self.assertIn("torch==2.6.0", combined_source)
         self.assertIn("Expected torch 2.6.0", combined_source)
-        self.assertIn("PREFER_FLASH_ATTENTION = False", combined_source)
+        self.assertNotIn("PREFER_FLASH_ATTENTION", combined_source)
         self.assertIn('"pip", "uninstall", "-y", "flash-attn"', combined_source)
-        self.assertIn("Falling back to SDPA", combined_source)
-        self.assertIn("import flash_attn", combined_source)
+        self.assertIn('ATTENTION = "sdpa"', combined_source)
+        self.assertIn('DISABLE_FLASH_ATTN2 = "True"', combined_source)
+        self.assertNotIn("import flash_attn", combined_source)
         self.assertIn("FrozenLake preflight failed", combined_source)
         self.assertIn("capture_output=True", combined_source)
         self.assertIn("check=False", combined_source)
@@ -48,6 +49,15 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertNotIn("av==14.4.0", general)
         self.assertIn("av==14.2.0", general)
         self.assertIn("av==14.2.0", colab)
+
+    def test_colab_launcher_defaults_to_sdpa(self) -> None:
+        launcher = (
+            REPOSITORY_ROOT / "scripts" / "finetune_lvr_frozenlake_3b_colab.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'export DISABLE_FLASH_ATTN2="${DISABLE_FLASH_ATTN2:-True}"',
+            launcher,
+        )
 
 
 if __name__ == "__main__":

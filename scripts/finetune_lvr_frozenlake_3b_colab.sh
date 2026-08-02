@@ -12,5 +12,8 @@ export EVAL_STEPS="${EVAL_STEPS:-250}"
 export SAVE_STEPS="${SAVE_STEPS:-250}"
 export SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-1}"
 export DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-2}"
+# The Colab notebook intentionally removes FlashAttention because binary wheels
+# are frequently incompatible with Colab's current PyTorch ABI.
+export DISABLE_FLASH_ATTN2="${DISABLE_FLASH_ATTN2:-True}"
 
 bash scripts/finetune_lvr_frozenlake_3b.sh
