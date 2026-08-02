@@ -10,7 +10,15 @@ from __future__ import annotations
 
 import argparse
 import math
+from pathlib import Path
+import sys
 from types import SimpleNamespace
+
+# Support both ``python -m scripts.smoke_test_frozenlake_lvr`` and direct
+# ``python scripts/smoke_test_frozenlake_lvr.py`` execution from the repo.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 import torch
 from transformers import AutoConfig, AutoProcessor

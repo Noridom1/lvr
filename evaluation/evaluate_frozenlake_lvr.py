@@ -7,7 +7,14 @@ import argparse
 import json
 import re
 from pathlib import Path
+import sys
 from typing import Any
+
+# Make the repository's top-level ``src`` package importable when this file is
+# launched directly as ``python evaluation/evaluate_frozenlake_lvr.py``.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 import torch
 from qwen_vl_utils import process_vision_info

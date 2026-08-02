@@ -35,6 +35,10 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("FrozenLake preflight failed", combined_source)
         self.assertIn("capture_output=True", combined_source)
         self.assertIn("check=False", combined_source)
+        self.assertIn('"scripts.smoke_test_frozenlake_lvr"', combined_source)
+        self.assertIn('"evaluation.evaluate_frozenlake_lvr"', combined_source)
+        self.assertNotIn('"scripts/smoke_test_frozenlake_lvr.py"', combined_source)
+        self.assertNotIn('"evaluation/evaluate_frozenlake_lvr.py"', combined_source)
         self.assertNotIn(
             'str(REPO_DIR / "requirements.txt")',
             combined_source,
@@ -58,6 +62,18 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
             'export DISABLE_FLASH_ATTN2="${DISABLE_FLASH_ATTN2:-True}"',
             launcher,
         )
+        self.assertIn('export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"', launcher)
+
+    def test_direct_entrypoints_add_repository_root_to_python_path(self) -> None:
+        expected_roots = {
+            "scripts/smoke_test_frozenlake_lvr.py": "parents[1]",
+            "evaluation/evaluate_frozenlake_lvr.py": "parents[1]",
+            "src/train/train_frozenlake_lvr.py": "parents[2]",
+        }
+        for relative_path, expected_parent in expected_roots.items():
+            source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(f"Path(__file__).resolve().{expected_parent}", source)
+            self.assertIn("sys.path.insert(0, str(REPOSITORY_ROOT))", source)
 
 
 if __name__ == "__main__":

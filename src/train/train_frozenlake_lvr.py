@@ -1,7 +1,15 @@
 """Train Qwen2.5-VL LVR on FrozenLake successor-state trajectories."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import sys
 from typing import Optional
+
+# DeepSpeed launches this file by path, which otherwise exposes ``src/train``
+# rather than the repository root on Python's module search path.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 import torch
 from transformers import AutoConfig, AutoProcessor, HfArgumentParser
