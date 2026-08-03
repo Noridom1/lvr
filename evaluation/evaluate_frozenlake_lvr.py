@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-folder", default="training_samples/frozenlake")
     parser.add_argument("--output-dir", default="frozenlake_evaluation")
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument(
+        "--sample-index",
+        type=int,
+        help="Evaluate only this zero-based record index from the selected JSONL split.",
+    )
     parser.add_argument("--max-lvr-steps", type=int, default=2048)
     parser.add_argument("--lvr-end-threshold", type=float, default=0.02)
     parser.add_argument("--max-action-tokens", type=int, default=64)
@@ -179,6 +184,14 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("FrozenLake evaluation requires CUDA")
     records = load_jsonl(args.data_path)
+    if args.sample_index is not None:
+        if args.max_samples is not None:
+            raise ValueError("--sample-index and --max-samples cannot be used together")
+        if not 0 <= args.sample_index < len(records):
+            raise IndexError(
+                f"sample index {args.sample_index} is outside [0, {len(records) - 1}]"
+            )
+        records = [records[args.sample_index]]
     if args.max_samples is not None:
         records = records[: args.max_samples]
 

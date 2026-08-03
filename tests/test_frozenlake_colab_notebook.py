@@ -38,6 +38,10 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertNotIn("capture_output=True", combined_source)
         self.assertIn('"scripts.smoke_test_frozenlake_lvr"', combined_source)
         self.assertIn('"evaluation.evaluate_frozenlake_lvr"', combined_source)
+        self.assertIn("--sample-index", combined_source)
+        self.assertIn("TEST_SAMPLE_INDEX", combined_source)
+        self.assertIn("qwen2.5-vl-3b-lora", combined_source)
+        self.assertIn('drive.mount("/content/drive")', combined_source)
         self.assertNotIn('"scripts/smoke_test_frozenlake_lvr.py"', combined_source)
         self.assertNotIn('"evaluation/evaluate_frozenlake_lvr.py"', combined_source)
         self.assertNotIn(
@@ -98,6 +102,7 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("non_lora_state_dict.bin", trainer_source)
         self.assertIn("PeftModel.from_pretrained", eval_source)
         self.assertIn("merge_and_unload", eval_source)
+        self.assertIn("args.sample_index", eval_source)
 
     def test_direct_entrypoints_add_repository_root_to_python_path(self) -> None:
         expected_roots = {
