@@ -40,6 +40,9 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn('"evaluation.evaluate_frozenlake_lvr"', combined_source)
         self.assertIn("--sample-index", combined_source)
         self.assertIn("TEST_SAMPLE_INDEX", combined_source)
+        self.assertIn("TRAIN_SAMPLE_INDEX", combined_source)
+        self.assertIn("--save-distance-trace", combined_source)
+        self.assertIn("latent_exit_reason", combined_source)
         self.assertIn("qwen2.5-vl-3b-lora", combined_source)
         self.assertIn('drive.mount("/content/drive")', combined_source)
         self.assertNotIn('"scripts/smoke_test_frozenlake_lvr.py"', combined_source)
@@ -103,6 +106,21 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("PeftModel.from_pretrained", eval_source)
         self.assertIn("merge_and_unload", eval_source)
         self.assertIn("args.sample_index", eval_source)
+
+    def test_evaluator_separates_latent_placeholders_from_action_output(self) -> None:
+        eval_source = (
+            REPOSITORY_ROOT / "evaluation/evaluate_frozenlake_lvr.py"
+        ).read_text(encoding="utf-8")
+        model_source = (REPOSITORY_ROOT / "src/model/qwen_lvr_model.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("lvr_diagnostics", model_source)
+        self.assertIn('"action_start_generated_index"', model_source)
+        self.assertIn('"latent_end_distances"', model_source)
+        self.assertIn('latent["latent_exit_reason"] == "threshold"', eval_source)
+        self.assertIn('"latent_budget_exit"', eval_source)
+        self.assertIn('"action_output": action_output', eval_source)
+        self.assertIn("--save-distance-trace", eval_source)
 
     def test_direct_entrypoints_add_repository_root_to_python_path(self) -> None:
         expected_roots = {

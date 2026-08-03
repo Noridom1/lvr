@@ -174,6 +174,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         criterion: Optional[str]="mse",
         lvr_end_threshold: Optional[float]=0.02,
         lvr_steps: Optional[List[int]]=None,
+        lvr_diagnostics: Optional[Dict[str, Any]]=None,
         **kwargs,
         ) -> Union[GenerateOutput, torch.LongTensor]:
         """
@@ -377,6 +378,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 criterion = criterion,
                 lvr_end_threshold= lvr_end_threshold,
                 lvr_max_steps = lvr_steps,
+                lvr_diagnostics=lvr_diagnostics,
                 **model_kwargs,)
             
         elif decoding_strategy == "steps":
@@ -651,6 +653,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             criterion: Optional[str]="mse",
             lvr_end_threshold: Optional[float]=0.1,
             lvr_max_steps: Optional[int]=16,
+            lvr_diagnostics: Optional[Dict[str, Any]]=None,
             **model_kwargs,
         ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
             r"""
@@ -712,8 +715,34 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
 
             # keep track of which sequences are already finished
             batch_size, cur_len = input_ids.shape
+            prompt_length = cur_len
             this_peer_finished = False
             unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+
+            if lvr_diagnostics is not None:
+                # Keep tracing lightweight: only scalar distances and token
+                # boundaries are copied to CPU. Hidden states remain on GPU and
+                # are released by the normal generation loop.
+                lvr_diagnostics.clear()
+                lvr_diagnostics.update(
+                    {
+                        "criterion": criterion,
+                        "threshold": float(lvr_end_threshold),
+                        "max_lvr_steps": int(lvr_max_steps),
+                        "sequences": [
+                            {
+                                "latent_started": False,
+                                "latent_start_generated_index": None,
+                                "latent_steps": 0,
+                                "latent_exit_reason": "not_started",
+                                "action_start_generated_index": None,
+                                "transition_token_id": None,
+                                "latent_end_distances": [],
+                            }
+                            for _ in range(batch_size)
+                        ],
+                    }
+                )
             
             model_kwargs = self._get_initial_cache_position(cur_len, input_ids.device, model_kwargs)
             # model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
@@ -833,7 +862,16 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 '''
 
                 last_tokens = input_ids[:,-1]
-                lvr_start_switch = (last_tokens == self.config.lvr_start_id).to(device=input_ids.device)            
+                lvr_start_switch = (last_tokens == self.config.lvr_start_id).to(device=input_ids.device)
+                previous_lvr_mode = lvr_mode_switch.clone()
+                if lvr_diagnostics is not None:
+                    generated_so_far = input_ids.shape[1] - prompt_length
+                    for batch_index in torch.nonzero(lvr_start_switch, as_tuple=False).flatten().tolist():
+                        trace = lvr_diagnostics["sequences"][batch_index]
+                        if not trace["latent_started"]:
+                            trace["latent_started"] = True
+                            trace["latent_exit_reason"] = None
+                            trace["latent_start_generated_index"] = generated_so_far - 1
                 '''
                     At this moment, the last_position_hidden_states has not been updated,
                     it is still the output of the position before.
@@ -841,12 +879,18 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 '''
                 if last_position_hidden_state is None:
                     lvr_end_switch = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+                    lvr_end_distance = None
                 else:
-                    lvr_end_switch = criterion_fct(
+                    lvr_end_distance = criterion_fct(
                                         last_position_hidden_state, 
                                         self.lvr_latent_end_emb.unsqueeze(0).expand_as(last_position_hidden_state)
                                         ).mean(dim=-1)
-                    lvr_end_switch = lvr_end_switch < lvr_end_threshold
+                    lvr_end_switch = lvr_end_distance < lvr_end_threshold
+                    if lvr_diagnostics is not None:
+                        for batch_index in torch.nonzero(previous_lvr_mode, as_tuple=False).flatten().tolist():
+                            lvr_diagnostics["sequences"][batch_index]["latent_end_distances"].append(
+                                float(lvr_end_distance[batch_index].detach().cpu())
+                            )
 
                 # If currently in LVR mode, increment counter
                 lvr_step_counter = lvr_step_counter + lvr_mode_switch.long()
@@ -855,6 +899,22 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 # Force exit if budget exceeded
                 lvr_budget_exceeded = lvr_step_counter >= lvr_max_steps
 
+                if lvr_diagnostics is not None:
+                    generated_so_far = input_ids.shape[1] - prompt_length
+                    threshold_exit = previous_lvr_mode & lvr_end_switch
+                    budget_exit = previous_lvr_mode & lvr_budget_exceeded & (~threshold_exit)
+                    for batch_index in torch.nonzero(previous_lvr_mode, as_tuple=False).flatten().tolist():
+                        trace = lvr_diagnostics["sequences"][batch_index]
+                        trace["latent_steps"] = int(lvr_step_counter[batch_index].detach().cpu())
+                    for batch_index in torch.nonzero(threshold_exit, as_tuple=False).flatten().tolist():
+                        trace = lvr_diagnostics["sequences"][batch_index]
+                        trace["latent_exit_reason"] = "threshold"
+                        trace["action_start_generated_index"] = generated_so_far
+                    for batch_index in torch.nonzero(budget_exit, as_tuple=False).flatten().tolist():
+                        trace = lvr_diagnostics["sequences"][batch_index]
+                        trace["latent_exit_reason"] = "budget"
+                        trace["action_start_generated_index"] = generated_so_far
+
                 '''
                     Goal: lvr_mode_switch = lvr_mode_switch + lvr_start_switch - lvr_end_switch
                     Update: exit lvr when lvr_budget_exceeded 
@@ -862,6 +922,14 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 '''
                 # lvr_mode_switch = ((lvr_mode_switch | lvr_start_switch) & (~lvr_end_switch)).to(torch.bool)
                 lvr_mode_switch = ((lvr_mode_switch | lvr_start_switch) & (~lvr_end_switch) & (~lvr_budget_exceeded)).to(torch.bool)
+
+                if lvr_diagnostics is not None:
+                    for batch_index, trace in enumerate(lvr_diagnostics["sequences"]):
+                        if (
+                            trace["action_start_generated_index"] == input_ids.shape[1] - prompt_length
+                            and trace["transition_token_id"] is None
+                        ):
+                            trace["transition_token_id"] = int(next_tokens[batch_index].detach().cpu())
 
                 last_position_hidden_state = outputs.last_position_hidden_state     #We can now update the last position hidden states    
 
@@ -882,6 +950,19 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 # This is needed to properly delete outputs.logits which may be very large for first iteration
                 # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
                 del outputs
+
+            if lvr_diagnostics is not None:
+                generated_token_count = input_ids.shape[1] - prompt_length
+                for trace in lvr_diagnostics["sequences"]:
+                    if trace["latent_started"] and trace["latent_exit_reason"] is None:
+                        trace["latent_exit_reason"] = "generation_stopped_while_latent"
+                    trace["generated_token_count"] = generated_token_count
+                    action_start = trace["action_start_generated_index"]
+                    trace["action_token_count"] = (
+                        max(0, generated_token_count - action_start)
+                        if action_start is not None
+                        else 0
+                    )
 
             if streamer is not None:
                 streamer.end()

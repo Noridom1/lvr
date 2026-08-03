@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lvr-steps", type=int, default=2048)
     parser.add_argument("--lvr-end-threshold", type=float, default=0.02)
     parser.add_argument("--max-action-tokens", type=int, default=64)
+    parser.add_argument(
+        "--save-distance-trace",
+        action="store_true",
+        help="Save every per-step latent-end distance (useful for one-sample diagnosis).",
+    )
     parser.add_argument("--attention", choices=("flash_attention_2", "sdpa"), default="flash_attention_2")
     return parser.parse_args()
 
@@ -65,6 +70,24 @@ def extract_actions(text: str) -> tuple[list[str], bool]:
     actions = [token for token in raw_tokens if token in ACTIONS]
     valid_format = bool(match) and len(actions) == len(raw_tokens) and bool(actions)
     return actions, valid_format
+
+
+def summarize_latent_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    distances = trace.get("latent_end_distances", [])
+    summary = {
+        "latent_started": trace.get("latent_started", False),
+        "latent_start_generated_index": trace.get("latent_start_generated_index"),
+        "latent_steps": trace.get("latent_steps", 0),
+        "latent_exit_reason": trace.get("latent_exit_reason", "missing_diagnostics"),
+        "action_start_generated_index": trace.get("action_start_generated_index"),
+        "action_token_count": trace.get("action_token_count", 0),
+        "generated_token_count": trace.get("generated_token_count", 0),
+        "transition_token_id": trace.get("transition_token_id"),
+        "latent_end_distance_first": distances[0] if distances else None,
+        "latent_end_distance_min": min(distances) if distances else None,
+        "latent_end_distance_final": distances[-1] if distances else None,
+    }
+    return summary
 
 
 def simulate(layout: list[list[str]], actions: list[str]) -> tuple[bool, str]:
@@ -210,12 +233,18 @@ def main() -> None:
         "valid_format": 0,
         "goal_success": 0,
         "shortest_path_success": 0,
+        "latent_threshold_exit": 0,
+        "latent_budget_exit": 0,
+        "latent_not_started": 0,
     }
+    latent_step_total = 0
+    minimum_distances: list[float] = []
 
     with result_path.open("w", encoding="utf-8", newline="\n") as output:
         for record in tqdm(records, desc="FrozenLake evaluation"):
             inputs = prepare_inputs(processor, record, image_folder).to(model.device)
             prompt_length = inputs.input_ids.shape[1]
+            diagnostics: dict[str, Any] = {}
             with torch.no_grad():
                 generated = model.generate(
                     **inputs,
@@ -225,13 +254,29 @@ def main() -> None:
                     criterion="mse",
                     lvr_end_threshold=args.lvr_end_threshold,
                     lvr_steps=[args.max_lvr_steps],
+                    lvr_diagnostics=diagnostics,
                 )
-            decoded = processor.decode(
-                generated[0, prompt_length:],
+            sequence = generated.sequences[0] if hasattr(generated, "sequences") else generated[0]
+            trace = diagnostics.get("sequences", [{}])[0]
+            latent = summarize_latent_trace(trace)
+            action_start = latent["action_start_generated_index"]
+            action_ids = (
+                sequence[prompt_length + action_start :]
+                if action_start is not None
+                else sequence[0:0]
+            )
+            action_output = processor.decode(
+                action_ids,
                 skip_special_tokens=False,
                 clean_up_tokenization_spaces=False,
             )
-            predicted, valid_format = extract_actions(decoded)
+            # A safety-cap exit means the learned stop condition failed. Tokens
+            # produced around latent placeholders are not a valid text answer
+            # and must not be scored as accidental LEFT/RIGHT/UP/DOWN strings.
+            if latent["latent_exit_reason"] == "threshold":
+                predicted, valid_format = extract_actions(action_output)
+            else:
+                predicted, valid_format = [], False
             expected = record["actions"]
             goal_success, terminal_reason = simulate(record["source"]["layout"], predicted)
             exact_match = predicted == expected
@@ -241,22 +286,50 @@ def main() -> None:
             counts["valid_format"] += int(valid_format)
             counts["goal_success"] += int(goal_success)
             counts["shortest_path_success"] += int(shortest_success)
-            output.write(
-                json.dumps(
-                    {
-                        "id": record["id"],
-                        "expected_actions": expected,
-                        "predicted_actions": predicted,
-                        "raw_output": decoded,
-                        "valid_format": valid_format,
-                        "exact_match": exact_match,
-                        "goal_success": goal_success,
-                        "shortest_path_success": shortest_success,
-                        "terminal_reason": terminal_reason,
-                    },
-                    ensure_ascii=False,
+            counts["latent_threshold_exit"] += int(latent["latent_exit_reason"] == "threshold")
+            counts["latent_budget_exit"] += int(latent["latent_exit_reason"] == "budget")
+            counts["latent_not_started"] += int(not latent["latent_started"])
+            latent_step_total += latent["latent_steps"]
+            if latent["latent_end_distance_min"] is not None:
+                minimum_distances.append(latent["latent_end_distance_min"])
+
+            transition_token = None
+            if latent["transition_token_id"] is not None:
+                transition_token = processor.decode(
+                    [latent["transition_token_id"]],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
                 )
+            row = {
+                "id": record["id"],
+                "expected_actions": expected,
+                "predicted_actions": predicted,
+                "raw_output": action_output,
+                "action_output": action_output,
+                **latent,
+                "transition_token": transition_token,
+                "transition_is_lvr_end": (
+                    latent["transition_token_id"] == getattr(model.config, "lvr_end_id", None)
+                ),
+                "lvr_end_threshold": args.lvr_end_threshold,
+                "max_lvr_steps": args.max_lvr_steps,
+                "valid_format": valid_format,
+                "exact_match": exact_match,
+                "goal_success": goal_success,
+                "shortest_path_success": shortest_success,
+                "terminal_reason": terminal_reason,
+            }
+            if args.save_distance_trace:
+                row["latent_end_distance_trace"] = trace.get("latent_end_distances", [])
+            output.write(
+                json.dumps(row, ensure_ascii=False)
                 + "\n"
+            )
+            tqdm.write(
+                f"{record['id']}: exit={latent['latent_exit_reason']} "
+                f"steps={latent['latent_steps']} "
+                f"min_distance={latent['latent_end_distance_min']} "
+                f"actions={' '.join(predicted) or '<none>'}"
             )
 
     total = counts["total"]
@@ -266,6 +339,10 @@ def main() -> None:
         "valid_format_rate": counts["valid_format"] / total if total else 0.0,
         "goal_success_rate": counts["goal_success"] / total if total else 0.0,
         "shortest_path_success_rate": counts["shortest_path_success"] / total if total else 0.0,
+        "latent_threshold_exit_rate": counts["latent_threshold_exit"] / total if total else 0.0,
+        "latent_budget_exit_rate": counts["latent_budget_exit"] / total if total else 0.0,
+        "average_latent_steps": latent_step_total / total if total else 0.0,
+        "minimum_observed_latent_end_distance": min(minimum_distances) if minimum_distances else None,
         "checkpoint": args.checkpoint,
         "data_path": args.data_path,
         "lvr_end_threshold": args.lvr_end_threshold,
