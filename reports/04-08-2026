@@ -1,0 +1,107 @@
+# Báo cáo huấn luyện LVR trên FrozenLake
+
+**Ngày:** 04-08-2026
+
+## 1. Mục tiêu
+
+Điều chỉnh phương pháp LVR cho bài toán điều hướng FrozenLake. Thay vì dùng ảnh ROI như LVR gốc, thí nghiệm dùng các ảnh trạng thái trung gian của trajectory để giám sát latent reasoning.
+
+Đầu vào của mô hình gồm:
+
+- Ảnh trạng thái ban đầu.
+- Instruction mô tả luật chơi FrozenLake.
+
+Đầu ra chỉ gồm chuỗi hành động `LEFT`, `RIGHT`, `UP`, `DOWN`. Các ảnh trung gian chỉ xuất hiện trong training, không được cung cấp khi inference.
+
+## 2. Dataset
+
+Dataset gồm 4.000 trajectory:
+
+| Split | Số mẫu |
+|---|---:|
+| Training | 3.600 |
+| Validation | 200 |
+| Test | 200 |
+
+Thống kê trên tập training:
+
+- Trung bình 3,20 ảnh trung gian/mẫu.
+- Ít nhất 1 và nhiều nhất 17 ảnh trung gian/mẫu.
+- Mỗi ảnh được mã hóa thành 81 visual latent tokens.
+- Trung bình khoảng 259 latent tokens/mẫu; nhỏ nhất 81 và lớn nhất 1.377.
+
+## 3. Mô hình và cấu hình huấn luyện
+
+Mô hình nền là `Qwen/Qwen2.5-VL-3B-Instruct`.
+
+- Đóng băng vision encoder, visual merger và trọng số gốc của language model.
+- Fine-tune bằng LoRA với rank 32 và alpha 64.
+- Khoảng 69,7 triệu trên tổng số 3,82 tỷ tham số được train, tương đương 1,82%.
+- Huấn luyện 5 epoch, tương đương 1.125 optimizer steps.
+- Batch size trên GPU là 1; gradient accumulation là 16; effective batch size là 16.
+- Learning rate `1e-5`, weight decay `0.1`, warmup ratio `0.03`, cosine scheduler.
+- BF16, gradient checkpointing, DeepSpeed ZeRO-2 và SDPA; không dùng FlashAttention 2.
+- Môi trường chạy: Google Colab với NVIDIA A100 40 GB và khoảng 83,5 GB system RAM.
+
+## 4. Hàm loss
+
+Tổng loss:
+
+\[
+L = L_{CE} + 0.1L_{latent} + 0.1L_{switch}
+\]
+
+Trong đó:
+
+- `loss_ce`: học chuỗi action cuối cùng.
+- `loss_lvr`: cosine loss giữa latent hidden states và visual embeddings của các ảnh trung gian.
+- `loss_mode_switch`: MSE loss để học thời điểm kết thúc latent reasoning và chuyển sang sinh action.
+
+Training flow:
+
+```text
+Ảnh ban đầu + instruction
+→ latent states được giám sát bởi các ảnh trung gian
+→ latent-end state
+→ chuỗi hành động
+```
+
+## 5. Kết quả hiện tại
+
+Training đã hoàn thành và các loss đều hữu hạn. Tuy nhiên, free-running inference chưa hoạt động đúng:
+
+- Mô hình không đạt điều kiện latent-end.
+- Latent rollout tiếp tục đến giới hạn 2.048 bước.
+- Sau khi bị buộc dừng, mô hình sinh text không hợp lệ thay vì các action.
+- Hiện tượng xảy ra trên cả validation sample và training sample.
+
+Ví dụ trên một training sample:
+
+| Thuộc tính | Kết quả |
+|---|---|
+| Ground truth | `RIGHT UP` |
+| Số latent dự kiến | 162 |
+| Số latent thực tế | 2.048, chạm giới hạn |
+| Latent-end threshold | 0,02 |
+| Khoảng cách nhỏ nhất | 4,1875 |
+| Action dự đoán | Không có action hợp lệ |
+
+Kết quả này cho thấy checkpoint hiện tại bị suy biến ở latent rollout hoặc latent termination. Đây không phải là việc Qwen2.5-VL bị deprecated.
+
+## 6. Nguyên nhân khả dĩ
+
+- Training dùng ground-truth visual embeddings tại các latent position, trong khi inference tái sử dụng latent do chính mô hình dự đoán.
+- Sai số tích lũy qua hàng trăm latent tokens gây ra khác biệt lớn giữa teacher forcing và free-running inference.
+- Cosine loss căn chỉnh hướng vector nhưng không trực tiếp kiểm soát độ lớn của vector được tái sử dụng.
+- Chuỗi latent dài, với 81 tokens cho mỗi ảnh trung gian.
+- Cơ chế mode switch chưa học được điểm kết thúc latent reasoning.
+
+## 7. Kiểm tra tiếp theo
+
+Trước khi train lại, cần thực hiện ba kiểm tra:
+
+1. **Oracle latent evaluation:** cung cấp ground-truth latent embeddings rồi kiểm tra khả năng sinh action.
+2. **Free-running evaluation:** để mô hình tự sinh toàn bộ latent như inference thực tế.
+3. **Forced-boundary evaluation:** dừng tại số latent dự kiến rồi kiểm tra riêng action decoder.
+
+Ba kiểm tra này sẽ xác định lỗi nằm ở action learning, latent rollout hay cơ chế latent termination. Nếu cần train lại, các hướng chính là giảm số latent tokens trên mỗi frame, dùng loss có kiểm soát cả hướng lẫn độ lớn vector, và đưa predicted latent vào training để giảm exposure bias.
