@@ -160,3 +160,17 @@ python evaluation/evaluate_frozenlake_lvr.py \
   --checkpoint /content/frozenlake_checkpoints/qwen2.5-vl-3b \
   --data-path data/frozenlake/test.jsonl
 ```
+
+For a forced-boundary check with the dataset's average latent length, use:
+
+```bash
+python evaluation/evaluate_frozenlake_lvr.py \
+  --checkpoint /content/frozenlake_checkpoints/qwen2.5-vl-3b \
+  --data-path data/frozenlake/test.jsonl \
+  --sample-index 0 \
+  --decoding-strategy fixed \
+  --fixed-lvr-steps 259
+```
+
+The notebook also includes an opt-in cell that selects either a `train` or
+`test` sample and runs this exact 259-token strategy.

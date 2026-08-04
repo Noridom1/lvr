@@ -26,6 +26,7 @@ from src.train.monkey_patch_forward_frozenlake import replace_qwen2_5_with_froze
 
 
 ACTIONS = {"LEFT", "RIGHT", "UP", "DOWN"}
+DEFAULT_FIXED_LVR_STEPS = 259
 DELTAS = {
     "LEFT": (0, -1),
     "RIGHT": (0, 1),
@@ -47,6 +48,21 @@ def parse_args() -> argparse.Namespace:
         help="Evaluate only this zero-based record index from the selected JSONL split.",
     )
     parser.add_argument("--max-lvr-steps", type=int, default=2048)
+    parser.add_argument(
+        "--decoding-strategy",
+        choices=("latent-end", "fixed"),
+        default="latent-end",
+        help=(
+            "Use the learned latent-end distance or roll out an exact latent-token "
+            "quota before resuming text decoding."
+        ),
+    )
+    parser.add_argument(
+        "--fixed-lvr-steps",
+        type=int,
+        default=DEFAULT_FIXED_LVR_STEPS,
+        help="Latent-token quota used by --decoding-strategy fixed (default: 259).",
+    )
     parser.add_argument("--lvr-end-threshold", type=float, default=0.02)
     parser.add_argument("--max-action-tokens", type=int, default=64)
     parser.add_argument(
@@ -204,6 +220,10 @@ def load_checkpoint(checkpoint: str, attention: str):
 
 def main() -> None:
     args = parse_args()
+    if args.max_lvr_steps <= 0:
+        raise ValueError("--max-lvr-steps must be positive")
+    if args.fixed_lvr_steps <= 0:
+        raise ValueError("--fixed-lvr-steps must be positive")
     if not torch.cuda.is_available():
         raise RuntimeError("FrozenLake evaluation requires CUDA")
     records = load_jsonl(args.data_path)
@@ -234,6 +254,7 @@ def main() -> None:
         "goal_success": 0,
         "shortest_path_success": 0,
         "latent_threshold_exit": 0,
+        "latent_fixed_steps_exit": 0,
         "latent_budget_exit": 0,
         "latent_not_started": 0,
     }
@@ -245,15 +266,20 @@ def main() -> None:
             inputs = prepare_inputs(processor, record, image_folder).to(model.device)
             prompt_length = inputs.input_ids.shape[1]
             diagnostics: dict[str, Any] = {}
+            fixed_decoding = args.decoding_strategy == "fixed"
+            latent_steps = args.fixed_lvr_steps if fixed_decoding else args.max_lvr_steps
+            # Fixed decoding also emits <|lvr_start|> and the forced
+            # <|lvr_latent_end|> boundary outside the recurrent-step quota.
+            generation_budget = latent_steps + args.max_action_tokens + (2 if fixed_decoding else 0)
             with torch.no_grad():
                 generated = model.generate(
                     **inputs,
                     do_sample=False,
-                    max_new_tokens=args.max_lvr_steps + args.max_action_tokens,
-                    decoding_strategy="latent",
+                    max_new_tokens=generation_budget,
+                    decoding_strategy="fixed" if fixed_decoding else "latent",
                     criterion="mse",
                     lvr_end_threshold=args.lvr_end_threshold,
-                    lvr_steps=[args.max_lvr_steps],
+                    lvr_steps=[latent_steps],
                     lvr_diagnostics=diagnostics,
                 )
             sequence = generated.sequences[0] if hasattr(generated, "sequences") else generated[0]
@@ -270,10 +296,10 @@ def main() -> None:
                 skip_special_tokens=False,
                 clean_up_tokenization_spaces=False,
             )
-            # A safety-cap exit means the learned stop condition failed. Tokens
-            # produced around latent placeholders are not a valid text answer
-            # and must not be scored as accidental LEFT/RIGHT/UP/DOWN strings.
-            if latent["latent_exit_reason"] == "threshold":
+            # A safety-cap exit means learned-end decoding failed. Fixed-step
+            # exits are intentional and resume from a forced latent-end token.
+            valid_latent_exit = latent["latent_exit_reason"] in {"threshold", "fixed_steps"}
+            if valid_latent_exit:
                 predicted, valid_format = extract_actions(action_output)
             else:
                 predicted, valid_format = [], False
@@ -287,6 +313,9 @@ def main() -> None:
             counts["goal_success"] += int(goal_success)
             counts["shortest_path_success"] += int(shortest_success)
             counts["latent_threshold_exit"] += int(latent["latent_exit_reason"] == "threshold")
+            counts["latent_fixed_steps_exit"] += int(
+                latent["latent_exit_reason"] == "fixed_steps"
+            )
             counts["latent_budget_exit"] += int(latent["latent_exit_reason"] == "budget")
             counts["latent_not_started"] += int(not latent["latent_started"])
             latent_step_total += latent["latent_steps"]
@@ -311,6 +340,12 @@ def main() -> None:
                 "transition_is_lvr_end": (
                     latent["transition_token_id"] == getattr(model.config, "lvr_end_id", None)
                 ),
+                "transition_is_lvr_latent_end": (
+                    latent["transition_token_id"]
+                    == getattr(model.config, "lvr_latent_end_id", None)
+                ),
+                "decoding_strategy": args.decoding_strategy,
+                "fixed_lvr_steps": args.fixed_lvr_steps,
                 "lvr_end_threshold": args.lvr_end_threshold,
                 "max_lvr_steps": args.max_lvr_steps,
                 "valid_format": valid_format,
@@ -340,11 +375,14 @@ def main() -> None:
         "goal_success_rate": counts["goal_success"] / total if total else 0.0,
         "shortest_path_success_rate": counts["shortest_path_success"] / total if total else 0.0,
         "latent_threshold_exit_rate": counts["latent_threshold_exit"] / total if total else 0.0,
+        "latent_fixed_steps_exit_rate": counts["latent_fixed_steps_exit"] / total if total else 0.0,
         "latent_budget_exit_rate": counts["latent_budget_exit"] / total if total else 0.0,
         "average_latent_steps": latent_step_total / total if total else 0.0,
         "minimum_observed_latent_end_distance": min(minimum_distances) if minimum_distances else None,
         "checkpoint": args.checkpoint,
         "data_path": args.data_path,
+        "decoding_strategy": args.decoding_strategy,
+        "fixed_lvr_steps": args.fixed_lvr_steps,
         "lvr_end_threshold": args.lvr_end_threshold,
         "max_lvr_steps": args.max_lvr_steps,
     }

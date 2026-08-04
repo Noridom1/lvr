@@ -77,3 +77,20 @@ Then remove `--max-samples` for all 200 test trajectories. The evaluator reports
 The latent decoder uses learned MSE stopping with a 2,048-step safety cap. Tune
 `--lvr-end-threshold` on the validation split only; keep the test split untouched
 until the threshold is selected.
+
+To bypass learned mode switching and use the training-set average of 259 latent
+tokens, select fixed decoding:
+
+```bash
+python evaluation/evaluate_frozenlake_lvr.py \
+  --checkpoint /checkpoints/frozenlake/checkpoint-100 \
+  --data-path data/frozenlake/test.jsonl \
+  --sample-index 0 \
+  --decoding-strategy fixed \
+  --fixed-lvr-steps 259
+```
+
+At the fixed boundary the decoder inserts `<|lvr_latent_end|>` before returning
+to ordinary text generation, matching the boundary context used during
+training. The Colab notebook's fixed-length sample cell can run the same path
+against either the train or test split.
