@@ -29,6 +29,17 @@ class FrozenLakePaperAlignedTest(unittest.TestCase):
         self.assertIn('LVR_START_TOKEN + (LVR_TOKEN * latent_count) + LVR_END_TOKEN', source)
         self.assertIn('"teacher_forced": teacher_forced', source)
 
+    def test_teacher_forced_decoder_supports_current_transformers(self):
+        source = (REPOSITORY_ROOT / "src/model/qwen_lvr_model.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("cur_len, input_ids.device, model_kwargs", source)
+        self.assertIn(
+            "except TypeError:\n"
+            "                model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)",
+            source,
+        )
+
     def test_response_uses_standard_lvr_boundary_without_latent_end(self):
         source = (REPOSITORY_ROOT / "src/frozenlake_lvr_dataset.py").read_text(
             encoding="utf-8"

@@ -507,9 +507,18 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             this_peer_finished = False
             unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
             
-            # model_kwargs = self._get_initial_cache_position(cur_len, input_ids.device, model_kwargs)
-            # again Transformer version issue
-            model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
+            # Transformers changed this private helper from
+            # ``(input_ids, model_kwargs)`` to
+            # ``(sequence_length, device, model_kwargs)``.  The vanilla
+            # decoder is used by the FrozenLake teacher-forced diagnostic, so
+            # keep it compatible with both forms just like the fixed-step
+            # decoder below.
+            try:
+                model_kwargs = self._get_initial_cache_position(
+                    cur_len, input_ids.device, model_kwargs
+                )
+            except TypeError:
+                model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
             model_forward = self.__call__
             if isinstance(model_kwargs.get("past_key_values"), Cache):
