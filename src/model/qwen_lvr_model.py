@@ -413,6 +413,12 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             # Vanilla decoding
             # enters LVR if it sees start
             # exits LVR if it sees end
+            #
+            # Do not pass strategy-only controls through ``model_kwargs``.
+            # ``_lvr_deocding`` forwards every remaining kwarg to ``forward``;
+            # the FrozenLake teacher-forced diagnostic uses this vanilla path,
+            # and its patched forward does not (and should not) accept latent-end
+            # ablation controls such as ``criterion``.
             result = self._lvr_deocding(
                 input_ids,
                 logits_processor=prepared_logits_processor,
@@ -420,9 +426,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
-                criterion = criterion,
-                lvr_end_threshold= lvr_end_threshold,
-                lvr_steps=lvr_steps,
                 **model_kwargs,
             )
 

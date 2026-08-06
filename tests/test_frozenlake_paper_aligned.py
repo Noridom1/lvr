@@ -40,6 +40,16 @@ class FrozenLakePaperAlignedTest(unittest.TestCase):
             source,
         )
 
+    def test_vanilla_decoder_does_not_forward_strategy_controls(self):
+        source = (REPOSITORY_ROOT / "src/model/qwen_lvr_model.py").read_text(
+            encoding="utf-8"
+        )
+        vanilla_dispatch = source.split("else:\n            # Vanilla decoding", 1)[1]
+        vanilla_dispatch = vanilla_dispatch.split("# Convert to legacy cache format", 1)[0]
+        self.assertNotIn("criterion = criterion", vanilla_dispatch)
+        self.assertNotIn("lvr_end_threshold= lvr_end_threshold", vanilla_dispatch)
+        self.assertNotIn("lvr_steps=lvr_steps", vanilla_dispatch)
+
     def test_response_uses_standard_lvr_boundary_without_latent_end(self):
         source = (REPOSITORY_ROOT / "src/frozenlake_lvr_dataset.py").read_text(
             encoding="utf-8"
