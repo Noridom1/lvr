@@ -2,8 +2,8 @@
 """Run one FrozenLake LVR batch through Qwen2.5-VL without updating weights.
 
 Run this on the GPU training machine before starting DeepSpeed.  The command
-checks the processor, latent/image cardinality, custom forward path, and all
-three loss components on one real trajectory.
+checks the processor, latent/image cardinality, custom forward path, and the
+paper-aligned CE plus MSE losses on one real trajectory.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ from src.train.monkey_patch_patch_emb import replace_qwen_2_5_vl_patch_emb
 LVR_TOKENS = (
     "<|lvr_start|>",
     "<|lvr|>",
-    "<|lvr_latent_end|>",
     "<|lvr_end|>",
 )
 
@@ -65,32 +64,24 @@ def main() -> None:
         processor.tokenizer.add_tokens(token, special_tokens=True)
 
     config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
-    config.latent_end_token = True
+    config.latent_end_token = False
     config.lvr_head = False
     config.lvr_head_type = "simple"
-    config.loss_lvr_fct = "cosine"
-    config.loss_mode_switch_fct = "mse"
+    config.loss_lvr_fct = "mse"
+    config.frozenlake_objective = "paper_aligned_fixed_steps_v2"
     replace_qwen2_5_with_frozenlake_forward()
-    model, loading_info = QwenWithLVR.from_pretrained(
+    model = QwenWithLVR.from_pretrained(
         args.model,
         config=config,
         torch_dtype=torch.bfloat16,
         attn_implementation=args.attention,
-        output_loading_info=True,
     )
-    if "lvr_latent_end_emb" in loading_info["missing_keys"]:
-        model.reset_lvr_latent_end_emb()
     model = model.cuda()
     replace_qwen_2_5_vl_patch_emb()
-
-    latent_end = model.lvr_latent_end_emb.detach().float()
-    if not torch.isfinite(latent_end).all():
-        raise FloatingPointError("lvr_latent_end_emb is non-finite immediately after loading")
+    if hasattr(model, "lvr_latent_end_emb"):
+        raise AssertionError("Paper-aligned FrozenLake unexpectedly initialized latent-end state")
 
     model.config.lvr_id = processor.tokenizer.convert_tokens_to_ids("<|lvr|>")
-    model.config.lvr_latent_end_id = processor.tokenizer.convert_tokens_to_ids(
-        "<|lvr_latent_end|>"
-    )
     model.config.lvr_start_id = processor.tokenizer.convert_tokens_to_ids("<|lvr_start|>")
     model.config.lvr_end_id = processor.tokenizer.convert_tokens_to_ids("<|lvr_end|>")
     if model.config.vocab_size < len(processor.tokenizer):
@@ -129,8 +120,9 @@ def main() -> None:
     losses = {
         "loss_ce": float(outputs.loss_ce),
         "loss_lvr": float(outputs.loss_lvr),
-        "loss_mode_switch": float(outputs.loss_mode_switch),
     }
+    if outputs.loss_mode_switch is not None:
+        raise AssertionError("Paper-aligned FrozenLake produced a mode-switch loss")
     if not all(math.isfinite(value) for value in losses.values()):
         raise FloatingPointError(f"Non-finite loss detected: {losses}")
 
@@ -141,7 +133,7 @@ def main() -> None:
             "sequence_tokens": int(batch["attention_mask"].sum().item()),
             "latent_positions": latent_positions,
             "target_images": int(batch["lvr_tokens_thw"].shape[0]),
-            "latent_end_norm": float(latent_end.norm()),
+            "loss_mode_switch": None,
             **losses,
         }
     )

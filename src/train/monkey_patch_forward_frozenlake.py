@@ -71,9 +71,6 @@ def qwen2_5_frozenlake_lvr_forward(
     selected_lvr_embeds = None
     batch_indices = None
     seq_positions = None
-    batch_indices_latentend = None
-    seq_positions_latentend = None
-
     if pixel_values is not None:
         image_embeds = torch.cat(self.model.get_image_features(pixel_values, image_grid_thw), dim=0)
         n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
@@ -101,16 +98,6 @@ def qwen2_5_frozenlake_lvr_forward(
                     f"tokens={seq_positions.numel()}, features={selected_lvr_embeds.shape[0]}"
                 )
             inputs_embeds[batch_indices, seq_positions] = selected_lvr_embeds.to(
-                inputs_embeds.device, inputs_embeds.dtype
-            )
-
-            latent_end_mask = input_ids == self.config.lvr_latent_end_id
-            batch_indices_latentend, seq_positions_latentend = torch.nonzero(
-                latent_end_mask, as_tuple=True
-            )
-            if not torch.all(latent_end_mask.sum(dim=1) == 1):
-                raise ValueError("Each training sample must contain exactly one latent-end token")
-            inputs_embeds[latent_end_mask] = self.lvr_latent_end_emb.to(
                 inputs_embeds.device, inputs_embeds.dtype
             )
 
@@ -171,9 +158,7 @@ def qwen2_5_frozenlake_lvr_forward(
         shift_logits = logits[..., :-1, :].contiguous().view(-1, self.config.vocab_size)
         shift_labels = labels[..., 1:].contiguous().view(-1)
         shift_labels = shift_labels.masked_fill(
-            (shift_labels == self.config.lvr_id)
-            | (shift_labels == self.config.lvr_latent_end_id),
-            IGNORE_INDEX,
+            shift_labels == self.config.lvr_id, IGNORE_INDEX
         ).to(shift_logits.device)
         loss_ce = CrossEntropyLoss()(shift_logits, shift_labels)
 
@@ -181,14 +166,6 @@ def qwen2_5_frozenlake_lvr_forward(
         target_latents = selected_lvr_embeds.to(predicted_latents.device).float()
         loss_lvr = set_lvr_loss_fct(self.config.loss_lvr_fct)(
             predicted_latents, target_latents
-        )
-
-        predicted_end = hidden_states[
-            batch_indices_latentend, seq_positions_latentend - 1
-        ].float()
-        target_end = self.lvr_latent_end_emb.unsqueeze(0).expand_as(predicted_end).float()
-        loss_mode_switch = set_lvr_loss_fct(self.config.loss_mode_switch_fct)(
-            predicted_end, target_end.to(predicted_end.device)
         )
 
     if not return_dict:

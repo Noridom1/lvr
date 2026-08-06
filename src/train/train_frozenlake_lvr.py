@@ -23,7 +23,6 @@ from src.train.monkey_patch_forward_frozenlake import replace_qwen2_5_with_froze
 from src.train.monkey_patch_patch_emb import replace_qwen_2_5_vl_patch_emb
 from src.train.train_utils import (
     get_peft_state_maybe_zero_3,
-    get_peft_state_non_lora_maybe_zero_3,
     safe_save_model_for_hf_trainer,
 )
 from src.trainer import QwenLVRSFTTrainer
@@ -54,31 +53,20 @@ def _find_lora_target_modules(model) -> list[str]:
     return targets
 
 
-def _load_non_lora_trainables(model, checkpoint: str) -> None:
-    state_path = Path(checkpoint) / "non_lora_state_dict.bin"
-    if not state_path.is_file():
-        raise FileNotFoundError(
-            f"LoRA checkpoint is missing its latent trainables: {state_path}"
-        )
-    state_dict = torch.load(state_path, map_location="cpu", weights_only=True)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if unexpected:
-        raise ValueError(f"Unexpected non-LoRA checkpoint keys: {unexpected}")
-    loaded = set(state_dict)
-    if not any(name.endswith("lvr_latent_end_emb") for name in loaded):
-        raise ValueError("LoRA checkpoint does not contain lvr_latent_end_emb")
-
-
 def train() -> None:
     parser = HfArgumentParser((ModelArguments, FrozenLakeDataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     if "Qwen2.5" not in model_args.model_id:
         raise ValueError("FrozenLake LVR currently supports Qwen2.5-VL models")
-    if not model_args.latent_end_token:
-        raise ValueError("Variable-length FrozenLake trajectories require --latent_end_token True")
+    if model_args.latent_end_token:
+        raise ValueError("Paper-aligned FrozenLake LVR requires --latent_end_token False")
     if model_args.lvr_head:
         raise ValueError("The FrozenLake trajectory baseline requires --lvr_head False")
+    if training_args.mode_switch_loss:
+        raise ValueError("Paper-aligned FrozenLake LVR requires --mode_switch_loss False")
+    if training_args.loss_lvr_fct != "mse":
+        raise ValueError("Paper-aligned FrozenLake LVR requires --loss_lvr_fct mse")
     if training_args.enable_data_packing:
         raise ValueError("FrozenLake auxiliary-image batches do not support data packing")
     if training_args.online_checkpoint:
@@ -102,29 +90,36 @@ def train() -> None:
         if training_args.lora_enable
         else training_args.checkpoint_name or model_args.model_id
     )
+    if training_args.checkpoint_name:
+        checkpoint_config = AutoConfig.from_pretrained(
+            training_args.checkpoint_name, trust_remote_code=True
+        )
+        if (
+            getattr(checkpoint_config, "latent_end_token", False)
+            or getattr(checkpoint_config, "frozenlake_objective", None)
+            != "paper_aligned_fixed_steps_v2"
+        ):
+            raise ValueError(
+                "This checkpoint predates the paper-aligned FrozenLake objective; "
+                "retrain from the base model in a new output directory"
+            )
+
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    config.latent_end_token = True
+    config.latent_end_token = False
     config.lvr_head = False
     config.lvr_head_type = model_args.lvr_head_type
-    config.loss_lvr_fct = training_args.loss_lvr_fct
-    config.loss_mode_switch_fct = training_args.loss_mode_switch_fct
+    config.loss_lvr_fct = "mse"
+    config.frozenlake_objective = "paper_aligned_fixed_steps_v2"
 
     replace_qwen2_5_with_frozenlake_forward()
-    model, loading_info = QwenWithLVR.from_pretrained(
+    model = QwenWithLVR.from_pretrained(
         model_path,
         config=config,
         torch_dtype=compute_dtype,
         attn_implementation=(
             "flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa"
         ),
-        output_loading_info=True,
     )
-    # The base Qwen checkpoint has no learned latent-end parameter.  Initialize
-    # it explicitly after meta-device checkpoint loading; preserve it on resume.
-    if "lvr_latent_end_emb" in loading_info["missing_keys"]:
-        model.reset_lvr_latent_end_emb()
-    if not model.lvr_latent_end_is_finite():
-        raise FloatingPointError("lvr_latent_end_emb is non-finite immediately after loading")
     replace_qwen_2_5_vl_patch_emb()
     model.config.use_cache = False
 
@@ -134,7 +129,6 @@ def train() -> None:
     _set_requires_grad(model.lm_head.parameters(), not training_args.freeze_llm)
     _set_requires_grad(model.visual.parameters(), not training_args.freeze_vision_tower)
     _set_requires_grad(model.visual.merger.parameters(), not training_args.freeze_merger)
-    model.lvr_latent_end_emb.requires_grad = True
     model.visual.to(dtype=compute_dtype, device=training_args.device)
 
     if training_args.gradient_checkpointing:
@@ -152,14 +146,10 @@ def train() -> None:
     for token in (
         "<|lvr_start|>",
         "<|lvr|>",
-        "<|lvr_latent_end|>",
         "<|lvr_end|>",
     ):
         processor.tokenizer.add_tokens(token, special_tokens=True)
     model.config.lvr_id = processor.tokenizer.convert_tokens_to_ids("<|lvr|>")
-    model.config.lvr_latent_end_id = processor.tokenizer.convert_tokens_to_ids(
-        "<|lvr_latent_end|>"
-    )
     model.config.lvr_start_id = processor.tokenizer.convert_tokens_to_ids("<|lvr_start|>")
     model.config.lvr_end_id = processor.tokenizer.convert_tokens_to_ids("<|lvr_end|>")
     if model.config.vocab_size < len(processor.tokenizer):
@@ -167,7 +157,6 @@ def train() -> None:
 
     if training_args.lora_enable:
         if training_args.checkpoint_name:
-            _load_non_lora_trainables(model, training_args.checkpoint_name)
             model = PeftModel.from_pretrained(
                 model,
                 training_args.checkpoint_name,
@@ -183,10 +172,6 @@ def train() -> None:
             )
             model = get_peft_model(model, peft_config)
 
-        # PEFT freezes every non-adapter parameter. The learned stopping target
-        # is deliberately the one small non-LoRA exception.
-        base_model = model.get_base_model()
-        base_model.lvr_latent_end_emb.requires_grad = True
         model.print_trainable_parameters()
 
     data_module = make_frozenlake_lvr_data_module(processor, data_args)
@@ -207,23 +192,9 @@ def train() -> None:
         lora_state = get_peft_state_maybe_zero_3(
             model.named_parameters(), training_args.lora_bias
         )
-        saved_non_lora_state = get_peft_state_non_lora_maybe_zero_3(
-            model.named_parameters(), require_grad_only=True
-        )
-        non_lora_state = {
-            name.rsplit(".", 1)[-1]: value
-            for name, value in saved_non_lora_state.items()
-            if name.endswith("lvr_latent_end_emb")
-        }
-        if set(non_lora_state) != {"lvr_latent_end_emb"}:
-            raise ValueError("Could not collect the trainable latent-end vector")
         if trainer.is_world_process_zero():
             model.get_base_model().config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=lora_state)
-            torch.save(
-                non_lora_state,
-                Path(training_args.output_dir) / "non_lora_state_dict.bin",
-            )
     else:
         safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
     if trainer.is_world_process_zero():

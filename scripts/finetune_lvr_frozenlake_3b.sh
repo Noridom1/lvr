@@ -42,13 +42,11 @@ deepspeed --num_gpus "$NUM_GPUS" src/train/train_frozenlake_lvr.py \
     --output_dir "$OUTPUT_DIR" \
     --run_name "$RUN_NAME" \
     --coconut True \
-    --latent_end_token True \
+    --latent_end_token False \
     --lvr_head False \
-    --mode_switch_loss True \
-    --loss_lvr_fct cosine \
+    --mode_switch_loss False \
+    --loss_lvr_fct mse \
     --loss_lvr_lambda 0.1 \
-    --loss_mode_switch_fct mse \
-    --loss_mode_switch_lambda 0.1 \
     --deepspeed "$DEEPSPEED_CONFIG" \
     --freeze_vision_tower True \
     --freeze_merger True \

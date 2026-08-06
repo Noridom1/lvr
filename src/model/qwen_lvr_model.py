@@ -56,6 +56,23 @@ from transformers.integrations.fsdp import is_fsdp_managed_module
 
 from src.model.lvr_heads import LVRHead, LVRHeadGLU
 
+
+def update_fixed_lvr_state(
+    previous_mode: torch.Tensor,
+    start_switch: torch.Tensor,
+    remaining_steps: torch.Tensor,
+    original_steps: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Advance exact fixed-budget state after one generation forward pass."""
+    candidate_mode = previous_mode | start_switch
+    just_entered = (~previous_mode) & candidate_mode
+    remaining_steps = torch.where(just_entered, original_steps, remaining_steps)
+    remaining_steps = remaining_steps - previous_mode.long()
+    budget_finished = previous_mode & (remaining_steps <= 0)
+    active_mode = candidate_mode & (remaining_steps > 0)
+    return active_mode, remaining_steps, budget_finished, just_entered
+
+
 class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
@@ -390,6 +407,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 synced_gpus=synced_gpus,
                 streamer=streamer,
                 lvr_steps = lvr_steps,
+                lvr_diagnostics=lvr_diagnostics,
                 **model_kwargs,)
         else:
             # Vanilla decoding
@@ -1002,6 +1020,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         synced_gpus: bool,
         streamer: Optional["BaseStreamer"],
         lvr_steps: List[int],
+        lvr_diagnostics: Optional[Dict[str, Any]]=None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
         r"""
@@ -1062,6 +1081,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
+        prompt_length = cur_len
         this_peer_finished = False
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         try:
@@ -1090,9 +1110,44 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         lvr_mode_switch = torch.zeros(batch_size,dtype=torch.bool,device=input_ids.device)  # switch gate for lvr mode
         last_position_hidden_state = None
 
-        # Track LVR quotas
-        lvr_steps_orig = torch.tensor(lvr_steps, dtype=torch.int, device=input_ids.device)  # original quota
+        # Track exact per-sequence LVR feedback quotas. A scalar/list-of-one
+        # budget broadcasts across a batch; otherwise one value is required per
+        # generated sequence.
+        if lvr_steps is None:
+            raise ValueError("Fixed-step LVR decoding requires lvr_steps")
+        lvr_steps_orig = torch.as_tensor(
+            lvr_steps, dtype=torch.long, device=input_ids.device
+        ).flatten()
+        if lvr_steps_orig.numel() == 1:
+            lvr_steps_orig = lvr_steps_orig.expand(batch_size).clone()
+        elif lvr_steps_orig.numel() != batch_size:
+            raise ValueError(
+                f"lvr_steps must contain one value or {batch_size} values, got "
+                f"{lvr_steps_orig.numel()}"
+            )
+        if torch.any(lvr_steps_orig <= 0):
+            raise ValueError("Every fixed LVR budget must be positive")
         lvr_remaining_steps = lvr_steps_orig.clone()
+        lvr_step_counter = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
+        if lvr_diagnostics is not None:
+            lvr_diagnostics.clear()
+            lvr_diagnostics.update(
+                {
+                    "strategy": "steps",
+                    "lvr_steps": [int(value) for value in lvr_steps_orig.detach().cpu().tolist()],
+                    "sequences": [
+                        {
+                            "latent_started": False,
+                            "latent_start_generated_index": None,
+                            "latent_steps": 0,
+                            "latent_exit_reason": "not_started",
+                            "action_start_generated_index": None,
+                            "transition_token_id": None,
+                        }
+                        for _ in range(batch_size)
+                    ],
+                }
+            )
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -1166,29 +1221,61 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 During LVR, keep passing hidden_states until quota uses up
             '''
             last_tokens = input_ids[:,-1]
-            lvr_start_switch = (last_tokens == self.config.lvr_start_id).to(device=input_ids.device)            
+            lvr_start_switch = (last_tokens == self.config.lvr_start_id).to(device=input_ids.device)
+            previous_lvr_mode = lvr_mode_switch.clone()
           
             '''
                 Goal: lvr_mode_switch = lvr_mode_switch + lvr_start_switch 
                 the exit is controlled by lvr quota now, not <|lvr_end|>
 
             '''
-            # Candidate new switch (no end token anymore)
-            new_mode_switch = lvr_mode_switch | lvr_start_switch
+            lvr_mode_switch, lvr_remaining_steps, budget_finished, just_entered = (
+                update_fixed_lvr_state(
+                    previous_lvr_mode,
+                    lvr_start_switch,
+                    lvr_remaining_steps,
+                    lvr_steps_orig,
+                )
+            )
+            lvr_step_counter = torch.where(
+                just_entered, torch.zeros_like(lvr_step_counter), lvr_step_counter
+            )
 
-            # Detect entry vs continuation
-            just_entered = (~lvr_mode_switch) & new_mode_switch
-            still_in     = lvr_mode_switch & new_mode_switch
+            # A feedback step is a forward pass whose final token embedding was
+            # replaced by the previous hidden state.
+            lvr_step_counter = lvr_step_counter + previous_lvr_mode.long()
 
-            # Reset quota when entering
-            lvr_remaining_steps = torch.where(just_entered, lvr_steps_orig, lvr_remaining_steps)
+            # Latent positions carry a deterministic placeholder id because its
+            # embedding is replaced on the next pass. At the exact budget
+            # boundary, force the standard LVR end token instead of trusting an
+            # unstable LM-head prediction.
+            next_tokens = torch.where(
+                lvr_mode_switch,
+                torch.full_like(next_tokens, self.config.lvr_id),
+                next_tokens,
+            )
+            next_tokens = torch.where(
+                budget_finished,
+                torch.full_like(next_tokens, self.config.lvr_end_id),
+                next_tokens,
+            )
 
-            # Decrement quota only if we were already inside before this step
-            lvr_remaining_steps = lvr_remaining_steps - lvr_mode_switch.long()
-
-            # Exit if quota used up
-            lvr_mode_switch = new_mode_switch & (lvr_remaining_steps > 0)
-
+            if lvr_diagnostics is not None:
+                generated_so_far = input_ids.shape[1] - prompt_length
+                for batch_index in torch.nonzero(just_entered, as_tuple=False).flatten().tolist():
+                    trace = lvr_diagnostics["sequences"][batch_index]
+                    trace["latent_started"] = True
+                    trace["latent_exit_reason"] = None
+                    trace["latent_start_generated_index"] = generated_so_far - 1
+                for batch_index in torch.nonzero(previous_lvr_mode, as_tuple=False).flatten().tolist():
+                    lvr_diagnostics["sequences"][batch_index]["latent_steps"] = int(
+                        lvr_step_counter[batch_index].detach().cpu()
+                    )
+                for batch_index in torch.nonzero(budget_finished, as_tuple=False).flatten().tolist():
+                    trace = lvr_diagnostics["sequences"][batch_index]
+                    trace["latent_exit_reason"] = "fixed_budget"
+                    trace["transition_token_id"] = self.config.lvr_end_id
+                    trace["action_start_generated_index"] = generated_so_far + 1
 
             last_position_hidden_state = outputs.last_position_hidden_state
 
@@ -1209,6 +1296,19 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             # This is needed to properly delete outputs.logits which may be very large for first iteration
             # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration
             del outputs
+
+        if lvr_diagnostics is not None:
+            generated_token_count = input_ids.shape[1] - prompt_length
+            for trace in lvr_diagnostics["sequences"]:
+                if trace["latent_started"] and trace["latent_exit_reason"] is None:
+                    trace["latent_exit_reason"] = "generation_stopped_while_latent"
+                trace["generated_token_count"] = generated_token_count
+                action_start = trace["action_start_generated_index"]
+                trace["action_token_count"] = (
+                    max(0, generated_token_count - action_start)
+                    if action_start is not None
+                    else 0
+                )
 
         if streamer is not None:
             streamer.end()

@@ -73,7 +73,8 @@ python scripts/smoke_test_frozenlake_lvr.py --attention sdpa
 ```
 
 Do not start training unless the result has `status: ok`, the latent and target
-counts match, and all three losses are finite.
+counts match, CE and MSE reconstruction losses are finite, and mode-switch loss
+is null.
 
 ## 4. Run a short backward/update pilot
 
@@ -106,8 +107,9 @@ print(f"RAM free: {memory.available / 1024**3:.1f} GiB")
 
 ## 5. Run the full job
 
-The Colab launcher uses one GPU, micro-batch 1, accumulation 16, ZeRO-3 CPU
-offload, and keeps one resumable checkpoint:
+The Colab launcher uses one GPU, micro-batch 1, accumulation 16, LoRA, ZeRO-2,
+and keeps one resumable checkpoint. LoRA is a memory-constrained departure from
+the paper's full-LLM update:
 
 ```bash
 OUTPUT_DIR=/content/frozenlake_checkpoints/qwen2.5-vl-3b \
@@ -143,20 +145,22 @@ is loaded from the checkpoint so the learned LVR token ids remain identical.
 
 ## 7. Validate before touching the test set
 
-First evaluate 20 validation samples and tune only the latent-end threshold:
+First run a short fixed-budget validation sweep:
 
 ```bash
 python evaluation/evaluate_frozenlake_lvr.py \
   --checkpoint /content/frozenlake_checkpoints/qwen2.5-vl-3b \
   --data-path data/frozenlake/validation.jsonl \
-  --max-samples 20
+  --max-samples 20 \
+  --sweep-lvr-steps 4 8 16 32 64 128 256 512
 ```
 
-Then evaluate all validation samples. Use the test split once after selecting
-the threshold:
+Then repeat the sweep on all validation samples. Read `selected_lvr_steps` from
+`budget_sweep.json` and use the test split once with that fixed budget:
 
 ```bash
 python evaluation/evaluate_frozenlake_lvr.py \
   --checkpoint /content/frozenlake_checkpoints/qwen2.5-vl-3b \
-  --data-path data/frozenlake/test.jsonl
+  --data-path data/frozenlake/test.jsonl \
+  --lvr-steps SELECTED_BUDGET
 ```

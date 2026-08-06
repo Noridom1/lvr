@@ -10,9 +10,9 @@ export NUM_GPUS="${NUM_GPUS:-1}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 
 # Full-parameter AdamW is killed by the 83 GiB Colab host when its CPU optimizer
-# states are materialized. Adapt the language path with LoRA while continuing to
-# train the task-specific latent-end vector. ZeRO-2 keeps the small optimizer on
-# the A100 and avoids CPUAdam's first-step RAM spike.
+# states are materialized. Adapt the language path with LoRA. ZeRO-2 keeps the
+# small optimizer on the A100 and avoids CPUAdam's first-step RAM spike. This is
+# a resource-constrained variant; the paper's canonical setup updates the LLM.
 export LORA_ENABLE="${LORA_ENABLE:-True}"
 export LORA_RANK="${LORA_RANK:-32}"
 export LORA_ALPHA="${LORA_ALPHA:-64}"

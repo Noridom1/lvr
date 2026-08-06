@@ -41,7 +41,9 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn("--sample-index", combined_source)
         self.assertIn("TEST_SAMPLE_INDEX", combined_source)
         self.assertIn("TRAIN_SAMPLE_INDEX", combined_source)
-        self.assertIn("--save-distance-trace", combined_source)
+        self.assertNotIn("--save-distance-trace", combined_source)
+        self.assertIn("--lvr-steps", combined_source)
+        self.assertIn("--sweep-lvr-steps", combined_source)
         self.assertIn("latent_exit_reason", combined_source)
         self.assertIn("qwen2.5-vl-3b-lora", combined_source)
         self.assertIn('drive.mount("/content/drive")', combined_source)
@@ -90,7 +92,7 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn('"LORA_ENABLE": "True"', combined_source)
         self.assertIn('"DEEPSPEED_CONFIG": "scripts/zero2.json"', combined_source)
 
-    def test_frozenlake_lora_saves_and_loads_latent_trainables(self) -> None:
+    def test_frozenlake_lora_uses_standard_adapter_checkpoint(self) -> None:
         train_source = (
             REPOSITORY_ROOT / "src/train/train_frozenlake_lvr.py"
         ).read_text(encoding="utf-8")
@@ -101,7 +103,8 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
             REPOSITORY_ROOT / "src/trainer/lvr_trainer.py"
         ).read_text(encoding="utf-8")
         self.assertIn("get_peft_model", train_source)
-        self.assertIn("non_lora_state_dict.bin", train_source)
+        self.assertNotIn("non_lora_state_dict.bin", train_source)
+        self.assertNotIn("non_lora_state_dict.bin", eval_source)
         self.assertIn("non_lora_state_dict.bin", trainer_source)
         self.assertIn("PeftModel.from_pretrained", eval_source)
         self.assertIn("merge_and_unload", eval_source)
@@ -116,11 +119,11 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         )
         self.assertIn("lvr_diagnostics", model_source)
         self.assertIn('"action_start_generated_index"', model_source)
-        self.assertIn('"latent_end_distances"', model_source)
-        self.assertIn('latent["latent_exit_reason"] == "threshold"', eval_source)
-        self.assertIn('"latent_budget_exit"', eval_source)
+        self.assertIn('"fixed_budget"', model_source)
+        self.assertIn('latent["latent_exit_reason"] == "fixed_budget"', eval_source)
+        self.assertIn('"latent_fixed_budget_exit"', eval_source)
         self.assertIn('"action_output": action_output', eval_source)
-        self.assertIn("--save-distance-trace", eval_source)
+        self.assertNotIn("--save-distance-trace", eval_source)
 
     def test_direct_entrypoints_add_repository_root_to_python_path(self) -> None:
         expected_roots = {
@@ -133,7 +136,7 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
             self.assertIn(f"Path(__file__).resolve().{expected_parent}", source)
             self.assertIn("sys.path.insert(0, str(REPOSITORY_ROOT))", source)
 
-    def test_missing_latent_end_parameter_is_initialized_after_loading(self) -> None:
+    def test_generic_latent_end_ablation_is_preserved_but_frozenlake_avoids_it(self) -> None:
         model_source = (REPOSITORY_ROOT / "src/model/qwen_lvr_model.py").read_text(
             encoding="utf-8"
         )
@@ -143,11 +146,10 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         for relative_path in (
             "scripts/smoke_test_frozenlake_lvr.py",
             "src/train/train_frozenlake_lvr.py",
+            "evaluation/evaluate_frozenlake_lvr.py",
         ):
             source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertIn("output_loading_info=True", source)
-            self.assertIn('if "lvr_latent_end_emb" in loading_info["missing_keys"]', source)
-            self.assertIn("model.reset_lvr_latent_end_emb()", source)
+            self.assertNotIn("model.reset_lvr_latent_end_emb()", source)
 
         self.assertIn("deepspeed.zero.GatheredParameters", model_source)
         self.assertIn("def lvr_latent_end_is_finite", model_source)

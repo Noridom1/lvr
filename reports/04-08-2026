@@ -2,6 +2,10 @@
 
 **Ngày:** 04-08-2026
 
+> **Deprecated experiment.** This report documents the former cosine plus
+> learned latent-end run. The paper-aligned FrozenLake path now uses CE + MSE,
+> no stopping loss, and fixed-budget decoding; do not resume these checkpoints.
+
 ## 1. Mục tiêu
 
 Điều chỉnh phương pháp LVR cho bài toán điều hướng FrozenLake. Thay vì dùng ảnh ROI như LVR gốc, thí nghiệm dùng các ảnh trạng thái trung gian của trajectory để giám sát latent reasoning.

@@ -21,7 +21,6 @@ from src.constants import (
     DEFAULT_IM_START_TOKEN,
     IGNORE_INDEX,
     LVR_END_TOKEN,
-    LVR_LATENT_END_TOKEN,
     LVR_START_TOKEN,
     LVR_TOKEN,
     SYSTEM_MESSAGE,
@@ -60,7 +59,7 @@ def visual_token_count(image_grid_thw: torch.Tensor, merge_size: int) -> int:
 def build_lvr_response(answer: str, latent_tokens: int) -> str:
     if latent_tokens <= 0:
         raise ValueError("A trajectory requires at least one latent visual token")
-    latent = LVR_START_TOKEN + (LVR_TOKEN * latent_tokens) + LVR_LATENT_END_TOKEN + LVR_END_TOKEN
+    latent = LVR_START_TOKEN + (LVR_TOKEN * latent_tokens) + LVR_END_TOKEN
     return f"{latent}\n<answer>{answer}</answer>"
 
 

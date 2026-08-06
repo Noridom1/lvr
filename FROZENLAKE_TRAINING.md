@@ -21,12 +21,12 @@ full-patch baseline avoids introducing an untrained resampler.
 The trainer uses:
 
 ```text
-L = L_action_CE + 0.1 * L_transition_cosine + 0.1 * L_latent_end_MSE
+L = L_action_CE + 0.1 * L_transition_MSE
 ```
 
 The vision tower and merger are frozen so both the input and target visual
-representations stay stable. The language model and learned latent-end vector
-are optimized.
+representations stay stable. The standard multi-GPU launcher optimizes the
+language model; the one-A100 Colab launcher uses LoRA as a constrained variant.
 
 ## GPU handoff
 
@@ -37,8 +37,8 @@ one-sample forward check:
 python scripts/smoke_test_frozenlake_lvr.py
 ```
 
-It must report `status: ok`, equal latent/target counts, and finite CE, latent,
-and mode-switch losses before training is launched.
+It must report `status: ok`, equal latent/target counts, finite CE and MSE
+reconstruction losses, and a null mode-switch loss before training is launched.
 
 Start the default two-GPU ZeRO-3 CPU-offload job:
 
@@ -53,9 +53,9 @@ NUM_GPUS=4 OUTPUT_DIR=/checkpoints/frozenlake \
   bash scripts/finetune_lvr_frozenlake_3b.sh
 ```
 
-The default is full-parameter training. The public LVR code declares LoRA
-arguments but does not attach PEFT adapters, so this entry point rejects
-`--lora_enable True` rather than silently running an unintended full tune.
+The default multi-GPU job is full-parameter language-model training, matching
+the paper. The Colab wrapper explicitly enables LoRA to fit a single A100; treat
+those results as a resource-constrained variant rather than a paper replication.
 
 ## Evaluation
 
@@ -74,6 +74,16 @@ Then remove `--max-samples` for all 200 test trajectories. The evaluator reports
 - whether the route reaches the goal without hitting a hole or leaving the board;
 - whether the successful route is also shortest.
 
-The latent decoder uses learned MSE stopping with a 2,048-step safety cap. Tune
-`--lvr-end-threshold` on the validation split only; keep the test split untouched
-until the threshold is selected.
+The latent decoder always exits after a fixed budget and forcibly emits
+`<|lvr_end|>`. Select a budget on validation with:
+
+```bash
+python evaluation/evaluate_frozenlake_lvr.py \
+  --checkpoint /checkpoints/frozenlake \
+  --data-path data/frozenlake/validation.jsonl \
+  --sweep-lvr-steps 4 8 16 32 64 128 256 512
+```
+
+The sweep selects by goal success, shortest-path success, exact match, and then
+the smaller budget. Pass the selected value through `--lvr-steps` for the single
+final test evaluation.
