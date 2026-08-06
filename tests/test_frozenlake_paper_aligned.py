@@ -6,6 +6,29 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FrozenLakePaperAlignedTest(unittest.TestCase):
+    def test_training_and_evaluation_share_the_exact_prompt_builder(self):
+        dataset_source = (
+            REPOSITORY_ROOT / "src/frozenlake_lvr_dataset.py"
+        ).read_text(encoding="utf-8")
+        evaluation_source = (
+            REPOSITORY_ROOT / "evaluation/evaluate_frozenlake_lvr.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def build_frozenlake_prompt_text", dataset_source)
+        self.assertIn(
+            'text=[build_frozenlake_prompt_text(record["instruction"])]',
+            evaluation_source,
+        )
+        self.assertNotIn("apply_chat_template", evaluation_source)
+
+    def test_diagnostics_expose_raw_and_teacher_forced_generation(self):
+        source = (
+            REPOSITORY_ROOT / "evaluation/evaluate_frozenlake_lvr.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"raw_generation": raw_output', source)
+        self.assertIn("def run_teacher_forced_diagnostic", source)
+        self.assertIn('LVR_START_TOKEN + (LVR_TOKEN * latent_count) + LVR_END_TOKEN', source)
+        self.assertIn('"teacher_forced": teacher_forced', source)
+
     def test_response_uses_standard_lvr_boundary_without_latent_end(self):
         source = (REPOSITORY_ROOT / "src/frozenlake_lvr_dataset.py").read_text(
             encoding="utf-8"

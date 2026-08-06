@@ -15,10 +15,19 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 import torch
-from qwen_vl_utils import process_vision_info
 from tqdm import tqdm
 from transformers import AutoConfig, AutoProcessor
 
+from src.constants import (
+    DEFAULT_IMAGE_TOKEN,
+    LVR_END_TOKEN,
+    LVR_START_TOKEN,
+    LVR_TOKEN,
+    VISION_END_TOKEN,
+    VISION_START_TOKEN,
+)
+from src.dataset.data_utils import get_image_info
+from src.frozenlake_lvr_dataset import build_frozenlake_prompt_text, visual_token_count
 from src.model.qwen_lvr_model import QwenWithLVR
 from src.train.monkey_patch_forward_frozenlake import replace_qwen2_5_with_frozenlake_forward
 
@@ -57,6 +66,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--max-action-tokens", type=int, default=64)
+    parser.add_argument(
+        "--teacher-forced-diagnostic",
+        action="store_true",
+        help=(
+            "Inject ground-truth successor-image latents through <|lvr_end|>, "
+            "then freely generate and score the action text."
+        ),
+    )
+    parser.add_argument(
+        "--image-min-pixels",
+        type=int,
+        help="Override the checkpoint processor's training-time minimum pixel count.",
+    )
+    parser.add_argument(
+        "--image-max-pixels",
+        type=int,
+        help="Override the checkpoint processor's training-time maximum pixel count.",
+    )
     parser.add_argument(
         "--attention",
         choices=("flash_attention_2", "sdpa"),
@@ -116,24 +143,138 @@ def simulate(layout: list[list[str]], actions: list[str]) -> tuple[bool, str]:
     return success, "goal" if success else "not_at_goal"
 
 
-def prepare_inputs(processor, record: dict[str, Any], image_folder: Path):
-    image_path = Path(record["initial_image"])
-    if not image_path.is_absolute():
-        image_path = image_folder / image_path
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": str(image_path)},
-                {"type": "text", "text": record["instruction"]},
-            ],
-        }
-    ]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    images, videos = process_vision_info(messages)
-    return processor(
-        text=[text], images=images, videos=videos, padding=True, return_tensors="pt"
+def resolve_image_path(relative_path: str, image_folder: Path) -> Path:
+    image_path = Path(relative_path)
+    return image_path if image_path.is_absolute() else image_folder / image_path
+
+
+def load_training_image(
+    relative_path: str,
+    image_folder: Path,
+    image_min_pixels: int,
+    image_max_pixels: int,
+):
+    image_path = resolve_image_path(relative_path, image_folder)
+    if not image_path.is_file():
+        raise FileNotFoundError(image_path)
+    return get_image_info(
+        str(image_path), image_min_pixels, image_max_pixels, None, None
     )
+
+
+def prepare_inputs(
+    processor,
+    record: dict[str, Any],
+    image_folder: Path,
+    image_min_pixels: int,
+    image_max_pixels: int,
+):
+    """Reproduce the training text and initial-image preprocessing exactly."""
+    initial_image = load_training_image(
+        record["initial_image"], image_folder, image_min_pixels, image_max_pixels
+    )
+    return processor(
+        text=[build_frozenlake_prompt_text(record["instruction"])],
+        images=[initial_image],
+        videos=None,
+        padding=False,
+        do_resize=False,
+        return_tensors="pt",
+    )
+
+
+def prepare_teacher_forced_inputs(
+    processor,
+    record: dict[str, Any],
+    image_folder: Path,
+    image_min_pixels: int,
+    image_max_pixels: int,
+):
+    """Build a prefix ending after gold successor latents and the LVR boundary."""
+    inputs = prepare_inputs(
+        processor, record, image_folder, image_min_pixels, image_max_pixels
+    )
+    target_images = [
+        load_training_image(path, image_folder, image_min_pixels, image_max_pixels)
+        for path in record["aux_images"]
+    ]
+    target_placeholders = (
+        VISION_START_TOKEN + DEFAULT_IMAGE_TOKEN + VISION_END_TOKEN
+    ) * len(target_images)
+    target_inputs = processor(
+        text=[target_placeholders],
+        images=target_images,
+        videos=None,
+        padding=False,
+        do_resize=False,
+        return_tensors="pt",
+    )
+    latent_count = visual_token_count(
+        target_inputs["image_grid_thw"], int(processor.image_processor.merge_size)
+    )
+    forced_prefix = (
+        LVR_START_TOKEN + (LVR_TOKEN * latent_count) + LVR_END_TOKEN + "\n"
+    )
+    forced_ids = processor.tokenizer(
+        forced_prefix,
+        add_special_tokens=False,
+        padding=False,
+        return_tensors="pt",
+    )["input_ids"]
+    inputs["input_ids"] = torch.cat([inputs["input_ids"], forced_ids], dim=1)
+    inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
+    inputs["lvr_tokens"] = target_inputs["pixel_values"]
+    inputs["lvr_tokens_thw"] = target_inputs["image_grid_thw"]
+    return inputs, latent_count
+
+
+def decode_continuation(processor, sequence, start: int) -> str:
+    return processor.decode(
+        sequence[start:],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+
+
+def run_teacher_forced_diagnostic(
+    model,
+    processor,
+    record: dict[str, Any],
+    image_folder: Path,
+    max_action_tokens: int,
+    image_min_pixels: int,
+    image_max_pixels: int,
+) -> dict[str, Any]:
+    inputs, latent_count = prepare_teacher_forced_inputs(
+        processor,
+        record,
+        image_folder,
+        image_min_pixels,
+        image_max_pixels,
+    )
+    inputs = inputs.to(model.device)
+    prefix_length = inputs.input_ids.shape[1]
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs,
+            do_sample=False,
+            max_new_tokens=max_action_tokens,
+        )
+    sequence = generated.sequences[0] if hasattr(generated, "sequences") else generated[0]
+    output = decode_continuation(processor, sequence, prefix_length)
+    actions, valid_format = extract_actions(output)
+    expected = record["actions"]
+    goal_success, terminal_reason = simulate(record["source"]["layout"], actions)
+    return {
+        "latent_steps": latent_count,
+        "output": output,
+        "predicted_actions": actions,
+        "valid_format": valid_format,
+        "exact_match": actions == expected,
+        "goal_success": goal_success,
+        "shortest_path_success": goal_success and len(actions) == len(expected),
+        "terminal_reason": terminal_reason,
+    }
 
 
 def validate_checkpoint_config(config, checkpoint: str) -> None:
@@ -210,6 +351,9 @@ def evaluate_budget(
     max_action_tokens: int,
     checkpoint: str,
     data_path: str,
+    teacher_forced_diagnostic: bool,
+    image_min_pixels: int,
+    image_max_pixels: int,
 ) -> dict[str, Any]:
     if lvr_steps <= 0:
         raise ValueError("--lvr-steps values must be positive")
@@ -224,12 +368,21 @@ def evaluate_budget(
         "latent_started": 0,
         "latent_fixed_budget_exit": 0,
         "latent_not_started": 0,
+        "teacher_forced_exact_match": 0,
+        "teacher_forced_valid_format": 0,
+        "teacher_forced_goal_success": 0,
     }
     latent_step_total = 0
 
     with result_path.open("w", encoding="utf-8", newline="\n") as output:
         for record in tqdm(records, desc=f"FrozenLake LVR steps={lvr_steps}"):
-            inputs = prepare_inputs(processor, record, image_folder).to(model.device)
+            inputs = prepare_inputs(
+                processor,
+                record,
+                image_folder,
+                image_min_pixels,
+                image_max_pixels,
+            ).to(model.device)
             prompt_length = inputs.input_ids.shape[1]
             diagnostics: dict[str, Any] = {}
             with torch.no_grad():
@@ -244,17 +397,14 @@ def evaluate_budget(
             sequence = generated.sequences[0] if hasattr(generated, "sequences") else generated[0]
             trace = diagnostics.get("sequences", [{}])[0]
             latent = summarize_latent_trace(trace)
+            raw_output = decode_continuation(processor, sequence, prompt_length)
             action_start = latent["action_start_generated_index"]
             action_ids = (
                 sequence[prompt_length + action_start :]
                 if action_start is not None
                 else sequence[0:0]
             )
-            action_output = processor.decode(
-                action_ids,
-                skip_special_tokens=False,
-                clean_up_tokenization_spaces=False,
-            )
+            action_output = decode_continuation(processor, action_ids, 0)
             if latent["latent_exit_reason"] == "fixed_budget":
                 predicted, valid_format = extract_actions(action_output)
             else:
@@ -276,6 +426,27 @@ def evaluate_budget(
             counts["latent_not_started"] += int(not latent["latent_started"])
             latent_step_total += latent["latent_steps"]
 
+            teacher_forced = None
+            if teacher_forced_diagnostic:
+                teacher_forced = run_teacher_forced_diagnostic(
+                    model,
+                    processor,
+                    record,
+                    image_folder,
+                    max_action_tokens,
+                    image_min_pixels,
+                    image_max_pixels,
+                )
+                counts["teacher_forced_exact_match"] += int(
+                    teacher_forced["exact_match"]
+                )
+                counts["teacher_forced_valid_format"] += int(
+                    teacher_forced["valid_format"]
+                )
+                counts["teacher_forced_goal_success"] += int(
+                    teacher_forced["goal_success"]
+                )
+
             transition_token = None
             if latent["transition_token_id"] is not None:
                 transition_token = processor.decode(
@@ -288,6 +459,8 @@ def evaluate_budget(
                 "expected_actions": expected,
                 "predicted_actions": predicted,
                 "action_output": action_output,
+                "raw_generation": raw_output,
+                "teacher_forced": teacher_forced,
                 **latent,
                 "transition_token": transition_token,
                 "transition_is_lvr_end": (
@@ -305,6 +478,14 @@ def evaluate_budget(
                 f"{record['id']}: exit={latent['latent_exit_reason']} "
                 f"steps={latent['latent_steps']} actions={' '.join(predicted) or '<none>'}"
             )
+            if not latent["latent_started"]:
+                tqdm.write(f"{record['id']}: raw generation={raw_output!r}")
+            if teacher_forced is not None:
+                tqdm.write(
+                    f"{record['id']}: teacher-forced actions="
+                    f"{' '.join(teacher_forced['predicted_actions']) or '<none>'} "
+                    f"output={teacher_forced['output']!r}"
+                )
 
     total = counts["total"]
     summary = {
@@ -320,6 +501,22 @@ def evaluate_budget(
             counts["latent_fixed_budget_exit"] / total if total else 0.0
         ),
         "average_latent_steps": latent_step_total / total if total else 0.0,
+        "teacher_forced_diagnostic": teacher_forced_diagnostic,
+        "teacher_forced_exact_match_accuracy": (
+            counts["teacher_forced_exact_match"] / total
+            if total and teacher_forced_diagnostic
+            else None
+        ),
+        "teacher_forced_valid_format_rate": (
+            counts["teacher_forced_valid_format"] / total
+            if total and teacher_forced_diagnostic
+            else None
+        ),
+        "teacher_forced_goal_success_rate": (
+            counts["teacher_forced_goal_success"] / total
+            if total and teacher_forced_diagnostic
+            else None
+        ),
         "checkpoint": checkpoint,
         "data_path": data_path,
         "lvr_steps": lvr_steps,
@@ -359,8 +556,15 @@ def main() -> None:
     model, processor = load_checkpoint(args.checkpoint, args.attention)
     output_dir = Path(args.output_dir)
     image_folder = Path(args.image_folder)
+    image_min_pixels = args.image_min_pixels or int(processor.image_processor.min_pixels)
+    image_max_pixels = args.image_max_pixels or int(processor.image_processor.max_pixels)
 
     if args.sweep_lvr_steps:
+        if args.teacher_forced_diagnostic:
+            raise ValueError(
+                "--teacher-forced-diagnostic is independent of the latent budget; "
+                "run it once with --lvr-steps instead of a budget sweep"
+            )
         budgets = sorted(set(args.sweep_lvr_steps))
         if any(value <= 0 for value in budgets):
             raise ValueError("Every --sweep-lvr-steps value must be positive")
@@ -375,6 +579,9 @@ def main() -> None:
                 args.max_action_tokens,
                 args.checkpoint,
                 args.data_path,
+                False,
+                image_min_pixels,
+                image_max_pixels,
             )
             for budget in budgets
         ]
@@ -405,6 +612,9 @@ def main() -> None:
             args.max_action_tokens,
             args.checkpoint,
             args.data_path,
+            args.teacher_forced_diagnostic,
+            image_min_pixels,
+            image_max_pixels,
         )
         print(json.dumps(summary, indent=2))
 

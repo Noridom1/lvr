@@ -44,6 +44,9 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertNotIn("--save-distance-trace", combined_source)
         self.assertIn("--lvr-steps", combined_source)
         self.assertIn("--sweep-lvr-steps", combined_source)
+        self.assertIn("--teacher-forced-diagnostic", combined_source)
+        self.assertIn('prediction["raw_generation"]', combined_source)
+        self.assertIn('prediction["teacher_forced"]', combined_source)
         self.assertIn("latent_exit_reason", combined_source)
         self.assertIn("qwen2.5-vl-3b-lora", combined_source)
         self.assertIn('drive.mount("/content/drive")', combined_source)
@@ -123,6 +126,9 @@ class FrozenLakeColabNotebookTest(unittest.TestCase):
         self.assertIn('latent["latent_exit_reason"] == "fixed_budget"', eval_source)
         self.assertIn('"latent_fixed_budget_exit"', eval_source)
         self.assertIn('"action_output": action_output', eval_source)
+        self.assertIn('"raw_generation": raw_output', eval_source)
+        self.assertIn('"teacher_forced": teacher_forced', eval_source)
+        self.assertIn("run_teacher_forced_diagnostic", eval_source)
         self.assertNotIn("--save-distance-trace", eval_source)
 
     def test_direct_entrypoints_add_repository_root_to_python_path(self) -> None:

@@ -63,6 +63,23 @@ def build_lvr_response(answer: str, latent_tokens: int) -> str:
     return f"{latent}\n<answer>{answer}</answer>"
 
 
+def build_frozenlake_prompt_text(instruction: str) -> str:
+    """Build the exact system/user/assistant prefix used by FrozenLake SFT."""
+    user_content = (
+        f"{VISION_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{VISION_END_TOKEN}\n{instruction}"
+    )
+    user_text = (
+        f"{DEFAULT_IM_START_TOKEN}user\n{user_content}{DEFAULT_IM_END_TOKEN}\n"
+        f"{DEFAULT_IM_START_TOKEN}assistant\n"
+    )
+    if not SYSTEM_MESSAGE:
+        return user_text
+    system_text = (
+        f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
+    )
+    return system_text + user_text
+
+
 def validate_frozenlake_record(record: dict[str, Any]) -> None:
     required = {"id", "task", "initial_image", "aux_images", "final_image", "actions", "answer", "instruction"}
     missing = required - record.keys()
@@ -134,13 +151,9 @@ class FrozenLakeLVRDataset(Dataset):
         merge_size = int(self.processor.image_processor.merge_size)
         latent_count = visual_token_count(lvr_tokens_thw, merge_size)
 
-        user_content = f"{VISION_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{VISION_END_TOKEN}\n{record['instruction']}"
-        user_text = (
-            f"{DEFAULT_IM_START_TOKEN}user\n{user_content}{DEFAULT_IM_END_TOKEN}\n"
-            f"{DEFAULT_IM_START_TOKEN}assistant\n"
-        )
+        prompt_text = build_frozenlake_prompt_text(record["instruction"])
         prompt = self.processor(
-            text=[user_text],
+            text=[prompt_text],
             images=[initial_image],
             videos=None,
             padding=False,
@@ -152,19 +165,9 @@ class FrozenLakeLVRDataset(Dataset):
             response_text, add_special_tokens=False, padding=False, return_tensors="pt"
         )["input_ids"].squeeze(0)
 
-        input_parts = []
-        label_parts = []
-        if SYSTEM_MESSAGE:
-            system_text = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
-            system_ids = self.processor.tokenizer(
-                system_text, add_special_tokens=False, return_tensors="pt"
-            )["input_ids"].squeeze(0)
-            input_parts.append(system_ids)
-            label_parts.append(torch.full_like(system_ids, IGNORE_INDEX))
-
         prompt_ids = prompt["input_ids"].squeeze(0)
-        input_parts.extend((prompt_ids, response_ids))
-        label_parts.extend((torch.full_like(prompt_ids, IGNORE_INDEX), response_ids))
+        input_parts = [prompt_ids, response_ids]
+        label_parts = [torch.full_like(prompt_ids, IGNORE_INDEX), response_ids]
         input_ids = torch.cat(input_parts).to(torch.long)
         labels = torch.cat(label_parts).to(torch.long)
 
